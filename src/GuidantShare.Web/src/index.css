@@ -1,0 +1,103 @@
+/* GuidantShare: design tokens and components matched to the FileSync dashboard */
+:root {
+  --card: #ffffff; --border: #e5e7eb; --radius: 0.375rem; --background: #ffffff; --foreground: #111827;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; --font-mono: 'JetBrains Mono', monospace;
+  --bg-page: var(--background); --card-bg: var(--card); --card-border: var(--border);
+  --card-shadow: 0 1px 3px rgba(0,0,0,.05), 0 2px 6px rgba(0,0,0,.03); --card-hover-shadow: 0 4px 14px rgba(0,0,0,.08);
+  --text-main: #111827; --text-secondary: #374151; --text-muted: #4b5563;
+  color-scheme: light; --link: #1f5fa6; --link-hover: #174a85; --primary-blue: #6ba3d6; --primary-blue-hover: #548ec4; --blue-subtle: #edf5fc; --input-bg: #ffffff;
+  --green-bg: #e6f4ea; --green-text: #137333; --green-border: #ceead6;
+  --yellow-bg: #fef7e0; --yellow-text: #b06000; --yellow-border: #feefc3;
+  --red-text: #ef4444; --gray-bg: #f3f4f6; --gray-border: #e5e7eb;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; transition: background-color .15s ease, border-color .15s ease, color .1s ease; }
+body { font-family: var(--font-sans); background: var(--bg-page); color: var(--text-main); padding: 24px 32px 60px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+.container { max-width: 1400px; margin: 0 auto; }
+h1, h2, h3 { color: var(--text-main); font-weight: 700; letter-spacing: -.01em } h1 { font-size: 1.5rem; margin: 6px 0 14px } h2 { font-size: 1.1rem; margin: 22px 0 8px }
+a { color: var(--link); font-weight: 500 } a:hover { color: var(--link-hover) }
+code { font-family: var(--font-mono); font-size: .85em; background: var(--gray-bg); padding: 1px 6px; border-radius: 4px }
+.muted { color: var(--text-muted) } .error { color: var(--red-text) }
+
+/* top nav */
+.top-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding: 12px 18px; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; box-shadow: var(--card-shadow); flex-wrap: wrap; gap: 12px }
+.brand-left { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--text-main) }
+.brand-left img { height: 38px; width: auto; border-radius: 6px }
+.brand-title { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; color: var(--primary-blue) }
+.brand-subtitle { font-size: .78rem; color: var(--text-muted); margin-top: -2px }
+.nav-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap }
+.nav-btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; font: 600 .83rem/1.4 var(--font-sans); padding: 7px 14px; border-radius: 8px; text-decoration: none; cursor: pointer; background: #5b95cb; color: #fff !important; border: 1px solid #5b95cb; box-shadow: 0 1px 3px rgba(0,0,0,.08); white-space: nowrap; transition: all .18s ease }
+.nav-btn:hover { background: #4f89be; border-color: #4f89be; box-shadow: 0 3px 8px rgba(91,149,203,.25); transform: translateY(-1px) }
+.nav-btn.active { background: #4278aa; border-color: #396a97; box-shadow: inset 0 2px 4px rgba(0,0,0,.2) }
+
+/* cards, grid */
+.card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 20px 24px; margin: 12px 0; box-shadow: var(--card-shadow) }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px } .grid.two { grid-template-columns: 1fr 1fr }
+.plan { text-decoration: none; color: var(--text-main); font-weight: 600; text-align: center; padding: 32px 14px; margin: 0; position: relative; overflow: hidden; transition: all .18s ease }
+.plan::before, .big::before { content: ""; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--primary-blue) }
+.plan:hover, .big:hover { border-color: var(--primary-blue); box-shadow: var(--card-hover-shadow); transform: translateY(-1px); color: var(--text-main) }
+.big { position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 6px; text-decoration: none; color: var(--text-main); font-size: 1.3rem; font-weight: 700; padding: 36px 32px; margin: 0; transition: all .18s ease }
+.big small { font-size: .82rem; font-weight: 400; color: var(--text-muted) } .disabled { opacity: .5 } .disabled::before { background: var(--gray-border) }
+
+/* banners */
+.banner { padding: 12px 18px; border-radius: 10px; margin: 0 0 16px; background: var(--green-bg); color: var(--green-text); border: 1px solid var(--green-border); font-size: .88rem }
+.banner.warn { background: var(--yellow-bg); color: var(--yellow-text); border-color: var(--yellow-border) } .banner a { color: inherit; font-weight: 600 }
+main .banner { margin: 12px 0 }
+.banner-info { border-left: 4px solid var(--primary-blue) } .banner-info div { margin: 3px 0 }
+.status.good { border-left: 4px solid #34a853 } .status.bad { border-left: 4px solid #fbbc04 }
+
+/* forms, buttons */
+label { display: block; margin: 12px 0; font-size: .8rem; font-weight: 500; color: var(--text-muted) }
+input, select { width: 100%; padding: 9px 12px; border: 1px solid var(--card-border); border-radius: 8px; background: var(--input-bg); color: var(--text-main); font: .88rem var(--font-sans); margin-top: 4px }
+input:focus, select:focus { outline: none; border-color: var(--primary-blue); box-shadow: 0 0 0 3px var(--blue-subtle) }
+button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: 600 .82rem var(--font-sans); padding: 8px 14px; border-radius: 8px; cursor: pointer; border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-main); transition: all .2s ease }
+button:hover:not(:disabled) { background: var(--gray-bg); border-color: var(--primary-blue) }
+button.primary { background: #5b95cb; border-color: #5b95cb; color: #fff } button.primary:hover:not(:disabled) { background: #4f89be; border-color: #4f89be; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(91,149,203,.25) }
+button:disabled { opacity: .5; cursor: not-allowed } button.link { border: 0; background: none; color: var(--link); padding: 0; font: inherit; font-weight: 500; display: inline; cursor: pointer; text-decoration: underline } button.link:hover:not(:disabled) { background: none; color: var(--link-hover) }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap } .row input, .row select { width: auto; flex: 1; min-width: 160px; margin: 0 } .bar { margin: 18px 0 }
+.form button { margin-right: 8px; margin-top: 6px }
+
+/* tables */
+table { width: 100%; border-collapse: collapse; text-align: left; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden; box-shadow: var(--card-shadow); margin: 10px 0 }
+th { background: var(--gray-bg); padding: 12px 18px; font-size: .78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--card-border) }
+td { padding: 12px 18px; font-size: .85rem; border-bottom: 1px solid var(--card-border); vertical-align: middle } tr:last-child td { border-bottom: none } tr:hover td { background: var(--gray-bg) }
+td select { padding: 5px 8px; margin: 0 }
+.crumbs { margin: 8px 0; font-size: .88rem; color: var(--text-muted) }
+
+/* upload */
+.drop { border: 2px dashed var(--card-border); border-radius: 14px; padding: 32px; text-align: center; margin: 14px 0; color: var(--text-muted); background: var(--card-bg) } .drop.over { border-color: var(--primary-blue); background: var(--blue-subtle) }
+.uplist { list-style: none; margin: 8px 0 } .uplist li { padding: 5px 0; font-size: .88rem }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: grid; place-items: center; padding: 16px; z-index: 10 } .modal .card { max-width: 540px; width: 100% } .modal .row { justify-content: flex-end; margin-top: 14px } .modal ul { margin: 8px 0 0 20px; font-size: .88rem }
+
+/* auth */
+.center { min-height: 80vh; display: grid; place-items: center; padding: 16px }
+.auth { width: 100%; max-width: 400px; text-align: center } .auth form { text-align: left } .auth h1 { font-size: 1.2rem; margin: 6px 0 12px } .auth-logo { height: 52px; margin-bottom: 6px } .auth button.primary { width: 100%; margin-top: 8px } .auth p { margin-top: 12px; font-size: .85rem }
+
+@media (max-width: 700px) { body { padding: 14px } .grid.two { grid-template-columns: 1fr } }
+
+/* matrix */
+.matrix td { vertical-align: top } .matrix tr.plan-start td { border-top: 2px solid var(--card-border) } .matrix .flow { white-space: nowrap; font-weight: 600; color: var(--text-secondary) }
+.tag { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600; line-height: 1.5; text-decoration: none; word-break: break-word }
+.tag-sf { background: var(--blue-subtle); color: var(--link); border: 1px solid var(--primary-blue) } .tag-sf:hover { background: var(--primary-blue); color: #fff }
+.tag-remote { background: var(--gray-bg); color: var(--text-secondary); border: 1px solid var(--gray-border) } .tag-off { background: var(--gray-bg); color: var(--text-muted); border: 1px dashed var(--gray-border) }
+
+.matrix th, .matrix td { text-align: left } .matrix td button.link { text-align: left; display: inline; font-size: .85rem; line-height: 1.5 }
+.matrix td:nth-child(1) { min-width: 130px } .matrix td:nth-child(3) { min-width: 190px; word-break: break-word } .matrix td .tag-remote { margin-right: 6px }
+.tag { border-radius: 8px; padding: 4px 10px; line-height: 1.45 }
+
+/* home: larger, centered plan cards */
+.home { max-width: 1200px; margin: 0 auto; text-align: center }
+.home h1 { font-size: 2rem; margin: 24px 0 28px }
+.home .grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; justify-content: center }
+.home .plan { font-size: 1.25rem; padding: 56px 20px; display: flex; align-items: center; justify-content: center }
+
+/* catalog editor form */
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px } .fields.hostport { grid-template-columns: 3fr 1fr }
+.modal { overflow-y: auto; align-items: start } .modal .card.wide { max-width: 640px; margin: 24px auto }
+
+/* settings: connect card */
+.connect-paste { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--card-border) } .connect-paste p { margin: 0 0 10px }
+
+/* every plan's table uses the same fixed column widths so columns line up from one plan to the next */
+.catalog { table-layout: fixed; width: 100% } .catalog th, .catalog td { overflow-wrap: anywhere; vertical-align: top }
+.catalog td.actions .row { flex-wrap: nowrap; gap: 6px; justify-content: flex-end } .catalog td.actions button { padding: 6px 10px }
+.catalog .tag { white-space: normal; display: inline-block; max-width: 100%; word-break: break-word }
