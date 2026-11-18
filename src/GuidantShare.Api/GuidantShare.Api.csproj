@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GuidantShare.Core\GuidantShare.Core.csproj" />
+    <ProjectReference Include="..\GuidantShare.Data\GuidantShare.Data.csproj" />
+    <ProjectReference Include="..\GuidantShare.ShareFile\GuidantShare.ShareFile.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="GuidantShare.Tests" />
+  </ItemGroup>
+</Project>
