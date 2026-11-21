@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -12,7 +13,9 @@ using GuidantShare.Data;
 using GuidantShare.ShareFile;
 
 var builder = WebApplication.CreateBuilder(args);
-var dataDir = Path.GetFullPath(builder.Configuration["Data:Dir"] ?? "data");
+// Runs as a Windows service in production (no effect when started from a console). Also makes relative paths resolve against the install folder.
+builder.Host.UseWindowsService();
+var dataDir = Path.GetFullPath(builder.Configuration["Data:Dir"] ?? "data", builder.Environment.ContentRootPath);
 Directory.CreateDirectory(dataDir);
 
 builder.Host.UseSerilog((ctx, cfg) => cfg.ReadFrom.Configuration(ctx.Configuration)
@@ -25,8 +28,22 @@ builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = maxUpl
 builder.Services.AddSingleton(AesGcmCipher.LoadOrCreate(builder.Configuration["Data:KeyPath"] ?? Path.Combine(dataDir, "keys", "master.key")));
 builder.Services.AddDbContext<AppDbContext>(o => o.UseSqlite(builder.Configuration["Data:ConnectionString"] ?? $"Data Source={Path.Combine(dataDir, "app.db")}"));
 builder.Services.AddSingleton<ISecretStore, SecretStore>();
-builder.Services.AddSingleton<IShareFileService>(sp => new ShareFileService(
-    sp.GetRequiredService<ISecretStore>(), new HttpClient(), sp.GetRequiredService<ILogger<ShareFileService>>()));
+// GuidantShare has its own ShareFile connection (separate from FileSync's). ShareFile:Mode=Mock is for local development only.
+if (string.Equals(builder.Configuration["ShareFile:Mode"], "Mock", StringComparison.OrdinalIgnoreCase))
+{
+    if (builder.Environment.IsProduction()) throw new InvalidOperationException("ShareFile:Mode=Mock is for development only.");
+    builder.Services.AddSingleton<IShareFileService, MockShareFileService>();
+}
+else
+{
+    builder.Services.AddSingleton<IShareFileService>(sp => new ShareFileService(
+        sp.GetRequiredService<ISecretStore>(), new HttpClient(), sp.GetRequiredService<ILogger<ShareFileService>>()));
+}
+
+// FileSync (private, localhost): the source of the health plans and folders, and the target of the SuperAdmin proxy
+var fileSyncOpts = builder.Configuration.GetSection("FileSync").Get<FileSyncOptions>() ?? new FileSyncOptions();
+builder.Services.AddSingleton(fileSyncOpts);
+builder.Services.AddSingleton<IFileSyncClient>(sp => new FileSyncClient(new HttpClient(), fileSyncOpts, sp.GetRequiredService<ILogger<FileSyncClient>>()));
 
 var emailOpts = builder.Configuration.GetSection("Email").Get<EmailOptions>() ?? new EmailOptions();
 builder.Services.AddSingleton(emailOpts);
@@ -65,24 +82,27 @@ builder.Services.AddRateLimiter(o =>
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1) }));
     o.AddPolicy("upload", ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.User.Identity?.Name ?? "x",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1) }));
+    // FileSync screens poll (logs, transfers, portal code), so this is generous; it still caps a runaway page or stolen session
+    o.AddPolicy("proxy", ctx => RateLimitPartition.GetFixedWindowLimiter(ctx.User.Identity?.Name ?? "x",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 600, Window = TimeSpan.FromMinutes(1) }));
+});
+
+// Behind the reverse proxy on this machine: trust X-Forwarded-* only from it (loopback is the default trusted proxy),
+// so the login rate limit and audit see the real client address
+builder.Services.Configure<ForwardedHeadersOptions>(o =>
+{
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
+    o.ForwardLimit = 1;
 });
 
 var app = builder.Build();
 
-// --- DB init + catalog seed
+// --- DB init (creates a missing database; the roles below always exist)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
     db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
-    // EnsureCreated doesn't alter existing tables: add columns introduced after the first run.
-    var conn = db.Database.GetDbConnection(); conn.Open();
-    using (var cmd = conn.CreateCommand())
-    {
-        cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('CatalogEntries') WHERE name='RemoteUsername'";
-        if (Convert.ToInt32(cmd.ExecuteScalar()) == 0) { cmd.CommandText = "ALTER TABLE CatalogEntries ADD COLUMN RemoteUsername TEXT"; cmd.ExecuteNonQuery(); }
-    }
-    conn.Close();
     var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
     foreach (var r in new[] { Roles.SuperAdmin, Roles.User })
         if (!await roles.RoleExistsAsync(r)) await roles.CreateAsync(new IdentityRole(r));
@@ -91,6 +111,7 @@ using (var scope = app.Services.CreateScope())
 // --- CLI: create-superadmin --email x [--password p]
 if (args.Length > 0 && args[0] == "create-superadmin") return await Cli.CreateSuperAdminAsync(app, args);
 
+app.UseForwardedHeaders();
 app.UseSerilogRequestLogging();
 if (!app.Environment.IsDevelopment()) app.UseHsts();
 app.Use(async (ctx, next) =>
@@ -118,6 +139,8 @@ app.Use(async (ctx, next) =>
 });
 
 app.MapEndpoints();
+// An unknown /api path is a 404, never the single-page app's index.html
+app.MapFallback("/api/{**rest}", () => Results.NotFound(new { error = "Not found." }));
 app.MapFallbackToFile("index.html");
 await StartupChecks.RunAsync(app);
 app.Run();

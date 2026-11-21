@@ -26,8 +26,9 @@ public class AuthIntegrationTests : IDisposable
     {
         var c = _app.NewClient();
         Assert.Equal(HttpStatusCode.Unauthorized, (await c.Get("/api/plans")).Status);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.Get("/api/entries/1/files")).Status);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.Get("/api/catalog")).Status);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await c.Get("/api/plans/x/folders/y/files")).Status);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await c.Get("/api/filesync/workflows")).Status);
+        Assert.Empty(_app.FileSync.Calls);   // nothing reached FileSync
     }
 
     [Fact]
@@ -65,9 +66,10 @@ public class AuthIntegrationTests : IDisposable
     {
         await _app.AddUserAsync("user@test.local", Roles.User);
         var c = _app.NewClient(); await c.Login("user@test.local");
-        foreach (var path in new[] { "/api/catalog", "/api/users", "/api/sharefile/status" })
+        foreach (var path in new[] { "/api/filesync/workflows", "/api/users", "/api/sharefile/status" })
             Assert.Equal(HttpStatusCode.Forbidden, (await c.Get(path)).Status);
-        Assert.Equal(HttpStatusCode.Forbidden, (await c.Post("/api/catalog/plans", new { name = "X" })).Status);
+        Assert.Equal(HttpStatusCode.Forbidden, (await c.Post("/api/filesync/workflows", new { name = "X" })).Status);
+        Assert.Empty(_app.FileSync.Calls);
         Assert.Equal(HttpStatusCode.Forbidden, (await c.Post("/api/invites", new { email = "b@test.local", role = "User" })).Status);
     }
 
@@ -125,5 +127,69 @@ public class AuthIntegrationTests : IDisposable
         Assert.Equal(HttpStatusCode.BadRequest, (await admin.Patch($"/api/users/{IdOf("admin@test.local")}", new { isActive = false })).Status);
         Assert.Equal(HttpStatusCode.OK, (await admin.Patch($"/api/users/{IdOf("user@test.local")}", new { isActive = false })).Status);
         Assert.Equal(HttpStatusCode.Unauthorized, (await _app.NewClient().Login("user@test.local")).Status);
+    }
+
+    private async Task<(ApiClient admin, Func<string, string> idOf)> AdminWithUsersAsync()
+    {
+        await _app.AddUserAsync("admin@test.local", Roles.SuperAdmin); await _app.AddUserAsync("user@test.local", Roles.User);
+        var admin = _app.NewClient(); await admin.Login("admin@test.local");
+        var users = (await admin.Get("/api/users")).Json.GetProperty("users").EnumerateArray().ToList();
+        return (admin, email => users.First(u => u.GetProperty("email").GetString() == email).GetProperty("id").GetString()!);
+    }
+
+    [Fact]
+    public async Task An_admin_can_set_another_users_password_and_the_old_one_stops_working()
+    {
+        var (admin, idOf) = await AdminWithUsersAsync();
+        var set = await admin.Post($"/api/users/{idOf("user@test.local")}/password", new { password = "A-Brand-New-Passphrase-7" });
+        Assert.Equal(HttpStatusCode.OK, set.Status);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _app.NewClient().Login("user@test.local")).Status);
+        Assert.Equal(HttpStatusCode.OK, (await _app.NewClient().Login("user@test.local", "A-Brand-New-Passphrase-7")).Status);
+    }
+
+    [Fact]
+    public async Task A_weak_admin_set_password_is_refused_and_nothing_changes()
+    {
+        var (admin, idOf) = await AdminWithUsersAsync();
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.Post($"/api/users/{idOf("user@test.local")}/password", new { password = "short" })).Status);
+        Assert.Equal(HttpStatusCode.OK, (await _app.NewClient().Login("user@test.local")).Status);
+    }
+
+    [Fact]
+    public async Task Normal_users_cannot_set_passwords_or_remove_users()
+    {
+        await _app.AddUserAsync("a@test.local", Roles.User); await _app.AddUserAsync("b@test.local", Roles.User);
+        var a = _app.NewClient(); await a.Login("a@test.local");
+        Assert.Equal(HttpStatusCode.Forbidden, (await a.Post("/api/users/anything/password", new { password = "A-Brand-New-Passphrase-7" })).Status);
+        Assert.Equal(HttpStatusCode.Forbidden, (await a.Delete("/api/users/anything")).Status);
+    }
+
+    [Fact]
+    public async Task An_admin_can_remove_a_user_but_not_themselves()
+    {
+        var (admin, idOf) = await AdminWithUsersAsync();
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.Delete($"/api/users/{idOf("admin@test.local")}")).Status);
+        Assert.Equal(HttpStatusCode.OK, (await admin.Delete($"/api/users/{idOf("user@test.local")}")).Status);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _app.NewClient().Login("user@test.local")).Status);
+        Assert.DoesNotContain((await admin.Get("/api/users")).Json.GetProperty("users").EnumerateArray(), u => u.GetProperty("email").GetString() == "user@test.local");
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.Delete("/api/users/no-such-id")).Status);
+    }
+
+    [Fact]
+    public async Task Removing_a_user_keeps_their_upload_history()
+    {
+        var (admin, idOf) = await AdminWithUsersAsync();
+        var userId = idOf("user@test.local");
+        _app.Query(db => { db.UploadAudits.Add(new UploadAudit { UserId = userId, FileName = "kept.csv", Status = "Succeeded", CreatedUtc = DateTime.UtcNow }); return db.SaveChanges(); });
+        Assert.Equal(HttpStatusCode.OK, (await admin.Delete($"/api/users/{userId}")).Status);
+        Assert.Contains(_app.Query(db => db.UploadAudits.ToList()), a => a.FileName == "kept.csv");
+    }
+
+    [Fact]
+    public async Task Health_reports_whether_FileSync_is_reachable()
+    {
+        Assert.Equal("ok", (await _app.NewClient().Get("/health")).Json.GetProperty("fileSync").GetString());
+        _app.FileSync.Down = true;
+        Assert.Equal("unreachable", (await _app.NewClient().Get("/health")).Json.GetProperty("fileSync").GetString());
     }
 }

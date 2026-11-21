@@ -15,28 +15,30 @@ public record InviteReq(string Email, string Role, bool? EmailOnly, bool? NoEmai
 public record UserPatch(bool? IsActive, string? Role);
 public record ForgotReq(string Email);
 public record ResetReq(string Email, string Token, string Password);
+public record SetPasswordReq(string? Password);
 public record SfSettingsReq(string Subdomain, string ClientId, string? ClientSecret, string? RedirectUri);
 public record SfCodeReq(string Code);
-public record PlanReq(string? Name);
-public record EntryReq(int PlanId, string? Direction, string? Label, string? ShareFileLink, string? ShareFilePath, string? RemoteKind,
-    string? RemoteHost, int? RemotePort, string? RemotePath, string? PortalName, string? RemoteNote, string? Username);
 
 public static class EndpointsExt
 {
     private static readonly ConcurrentDictionary<string, (DateTime at, IReadOnlyList<SfItem> items)> FolderCache = new();
-        private static readonly ConcurrentDictionary<string, string> SeenFolders = new();   // entryId:folderId -> path relative to the entry's root, for folders reachable from it
+    // planKey/folderKey:shareFileFolderId -> path relative to the folder's root, for subfolders reachable from it
+    private static readonly ConcurrentDictionary<string, string> SeenFolders = new();
     private static readonly ConcurrentDictionary<string, DateTime> OAuthStates = new();
 
     private static IReadOnlyList<string> Errs(IdentityResult r) => r.Errors.Select(e => e.Description).ToList();
 
     public static void MapEndpoints(this WebApplication app)
     {
-        app.MapGet("/health", async (IShareFileService sf, IEmailSender email, AppDbContext db) =>
+        app.MapGet("/health", async (IShareFileService sf, IEmailSender email, IFileSyncClient fs) =>
         {
             string emailState = "ok";
             if (email is GraphEmailSender g && await g.CheckAsync() != null) emailState = "misconfigured";
             var st = await sf.GetStatusAsync();
-            return new { status = "ok", email = emailState, emailMode = email.Mode,
+            string fileSync;
+            try { fileSync = (await fs.GetCatalogAsync()).Stale ? "unreachable" : "ok"; }
+            catch (FileSyncUnavailableException) { fileSync = "unreachable"; }
+            return new { status = "ok", email = emailState, emailMode = email.Mode, fileSync,
                 sharefile = st.Connected ? "connected" : (st.Configured ? "disconnected" : "not_configured") };
         });
 
@@ -119,7 +121,6 @@ public static class EndpointsExt
             var u = await um.FindByIdAsync(id);
             if (u == null) return Results.NotFound();
             var isSelf = u.Id == um.GetUserId(me);
-            var wasAdmin = await um.IsInRoleAsync(u, Roles.SuperAdmin);
             if (isSelf && (p.IsActive == false || (p.Role != null && p.Role != Roles.SuperAdmin)))
                 return Results.BadRequest(new { error = "You can't deactivate or demote yourself." });
             if (p.Role is not null)
@@ -129,6 +130,28 @@ public static class EndpointsExt
                 await um.AddToRoleAsync(u, p.Role);
             }
             if (p.IsActive is not null) { u.IsActive = p.IsActive.Value; await um.UpdateAsync(u); await um.UpdateSecurityStampAsync(u); }
+            return Results.Ok(new { ok = true });
+        });
+
+        // Removes the account. Their upload history stays (it records who uploaded what).
+        admin.MapDelete("/users/{id}", async (string id, UserManager<AppUser> um, ClaimsPrincipal me) =>
+        {
+            var u = await um.FindByIdAsync(id);
+            if (u == null) return Results.NotFound();
+            if (u.Id == um.GetUserId(me)) return Results.BadRequest(new { error = "You can't remove yourself." });
+            var r = await um.DeleteAsync(u);
+            return r.Succeeded ? Results.Ok(new { ok = true }) : Results.BadRequest(new { error = string.Join(" ", Errs(r)) });
+        });
+
+        // The admin types a new password for the user (it is checked by the same rules as any password) and tells them. Signs them out everywhere.
+        admin.MapPost("/users/{id}/password", async (string id, SetPasswordReq req, UserManager<AppUser> um) =>
+        {
+            var u = await um.FindByIdAsync(id);
+            if (u == null) return Results.NotFound();
+            var token = await um.GeneratePasswordResetTokenAsync(u);
+            var r = await um.ResetPasswordAsync(u, token, req.Password ?? "");
+            if (!r.Succeeded) return Results.BadRequest(new { error = string.Join(" ", Errs(r)) });
+            await um.UpdateSecurityStampAsync(u);
             return Results.Ok(new { ok = true });
         });
 
@@ -158,7 +181,7 @@ public static class EndpointsExt
             return Results.Ok(new { ok = true });
         });
 
-        // ---------- ShareFile connection (SuperAdmin): one connection shared by the whole team
+        // ---------- ShareFile connection (SuperAdmin): GuidantShare's own connection, separate from FileSync's
         admin.MapGet("/sharefile/status", async (IShareFileService sf) => await sf.GetStatusAsync());
         admin.MapPost("/sharefile/settings", async (SfSettingsReq r, IShareFileService sf) =>
         {
@@ -180,9 +203,9 @@ public static class EndpointsExt
         admin.MapGet("/sharefile/callback", async (string? code, string? state, string? error, IShareFileService sf, UserManager<AppUser> um, ClaimsPrincipal me) =>
         {
             if (error != null || code == null || state == null || !OAuthStates.TryRemove(state, out var exp) || exp < DateTime.UtcNow)
-                return Results.Redirect("/admin/sharefile?result=failed");
-            try { await sf.ConnectWithCodeAsync(code, (await um.GetUserAsync(me))?.Email ?? "unknown"); return Results.Redirect("/admin/sharefile?result=connected"); }
-            catch { return Results.Redirect("/admin/sharefile?result=failed"); }
+                return Results.Redirect("/admin/settings?result=failed");
+            try { await sf.ConnectWithCodeAsync(code, (await um.GetUserAsync(me))?.Email ?? "unknown"); return Results.Redirect("/admin/settings?result=connected"); }
+            catch { return Results.Redirect("/admin/settings?result=failed"); }
         });
         // Manual fallback: paste the code (or the whole URL ShareFile sent you to).
         admin.MapPost("/sharefile/exchange", async (SfCodeReq r, IShareFileService sf, UserManager<AppUser> um, ClaimsPrincipal me) =>
@@ -194,158 +217,149 @@ public static class EndpointsExt
             catch (Exception ex) { return Results.BadRequest(new { error = ex.Message }); }
         });
         admin.MapPost("/sharefile/disconnect", async (IShareFileService sf) => { await sf.DisconnectAsync(); return Results.Ok(await sf.GetStatusAsync()); });
-        // ---------- catalog management (SuperAdmin). Every entry must carry a ShareFile folder link; passwords are never stored.
-        admin.MapGet("/catalog", async (AppDbContext db, IShareFileService sf, CancellationToken ct) =>
-        {
-            var plans = await db.HealthPlans.Where(p => p.IsActive).Include(p => p.Entries).OrderBy(p => p.SortOrder).ThenBy(p => p.PlanId).ToListAsync(ct);
-            var list = new List<object>();
-            foreach (var p in plans)
+
+        // ---------- FileSync proxy (SuperAdmin): the FileSync screens call these; FileSync itself is never exposed.
+        // Only calls in FileSyncProxyRules are forwarded. CSRF is checked for every non-GET by the middleware in Program.cs.
+        admin.MapMethods("/filesync/{**path}", new[] { "GET", "POST", "PUT", "DELETE" },
+            async (string path, HttpContext ctx, IFileSyncClient fs, AppDbContext db, UserManager<AppUser> um, CancellationToken ct) =>
             {
-                var entries = new List<object>();
-                foreach (var e in p.Entries.Where(e => e.IsActive).OrderBy(e => e.Direction).ThenBy(e => e.EntryId))
+                if (!FileSyncProxyRules.IsAllowed(ctx.Request.Method, path, out var target))
+                    return Results.Json(new { error = "That FileSync call is not allowed." }, statusCode: 403);
+
+                using var req = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), target + ctx.Request.QueryString);
+                if (ctx.Request.ContentLength > 0 || ctx.Request.Headers.ContainsKey("Transfer-Encoding"))
                 {
-                    string? link = null;
-                    if (e.SharefileFolderId != null) { try { link = await sf.GetWebLinkAsync(e.SharefileFolderId, ct); } catch { } }
-                    entries.Add(new { entryId = e.EntryId, label = e.Label, direction = e.Direction.ToString(), remoteKind = e.RemoteKind.ToString(),
-                        remoteHost = e.RemoteHost, remotePort = e.RemotePort, remotePath = e.RemotePath, portalName = e.PortalName, remoteNote = e.RemoteNote,
-                        remote = e.RemoteDisplay, username = e.RemoteUsername, shareFilePath = e.SharefileDisplayPath, shareFileLink = link });
+                    req.Content = new StreamContent(ctx.Request.Body);
+                    if (ctx.Request.ContentType != null) req.Content.Headers.TryAddWithoutValidation("Content-Type", ctx.Request.ContentType);
                 }
-                list.Add(new { planId = p.PlanId, name = p.Name, entries });
-            }
-            return list;
-        });
-        admin.MapPost("/catalog/plans", async (PlanReq r, AppDbContext db) =>
-        {
-            var name = r.Name?.Trim() ?? "";
-            if (name.Length is 0 or > 100) return Results.BadRequest(new { error = "Enter a health plan name (up to 100 characters)." });
-            if (await db.HealthPlans.AnyAsync(p => p.IsActive && p.Name == name)) return Results.BadRequest(new { error = "A health plan with that name already exists." });
-            var order = (await db.HealthPlans.MaxAsync(p => (int?)p.SortOrder) ?? 0) + 1;
-            var plan = new HealthPlan { Name = name, SortOrder = order };
-            db.HealthPlans.Add(plan); await db.SaveChangesAsync();
-            return Results.Ok(new { planId = plan.PlanId });
-        });
-        admin.MapPatch("/catalog/plans/{id:int}", async (int id, PlanReq r, AppDbContext db) =>
-        {
-            var plan = await db.HealthPlans.FirstOrDefaultAsync(p => p.PlanId == id && p.IsActive);
-            if (plan == null) return Results.NotFound();
-            var name = r.Name?.Trim() ?? "";
-            if (name.Length is 0 or > 100) return Results.BadRequest(new { error = "Enter a health plan name (up to 100 characters)." });
-            if (await db.HealthPlans.AnyAsync(p => p.IsActive && p.Name == name && p.PlanId != id)) return Results.BadRequest(new { error = "A health plan with that name already exists." });
-            plan.Name = name; await db.SaveChangesAsync();
-            return Results.Ok(new { ok = true });
-        });
-        admin.MapDelete("/catalog/plans/{id:int}", async (int id, AppDbContext db) =>
-        {   // soft delete keeps the upload audit history readable
-            var plan = await db.HealthPlans.Include(p => p.Entries).FirstOrDefaultAsync(p => p.PlanId == id && p.IsActive);
-            if (plan == null) return Results.NotFound();
-            plan.IsActive = false; foreach (var e in plan.Entries) e.IsActive = false;
-            await db.SaveChangesAsync();
-            return Results.Ok(new { ok = true });
-        });
-        admin.MapPost("/catalog/entries", async (EntryReq r, AppDbContext db, IShareFileService sf, CancellationToken ct) =>
-        {
-            var plan = await db.HealthPlans.FirstOrDefaultAsync(p => p.PlanId == r.PlanId && p.IsActive, ct);
-            if (plan == null) return Results.BadRequest(new { error = "Choose a health plan." });
-            var e = new CatalogEntry { PlanId = plan.PlanId };
-            if (await ApplyEntryAsync(e, plan.Name, r, sf, ct) is { } err) return Results.BadRequest(new { error = err });
-            db.CatalogEntries.Add(e); await db.SaveChangesAsync(ct);
-            return Results.Ok(new { entryId = e.EntryId });
-        });
-        admin.MapPut("/catalog/entries/{id:int}", async (int id, EntryReq r, AppDbContext db, IShareFileService sf, CancellationToken ct) =>
-        {
-            var e = await db.CatalogEntries.Include(x => x.Plan).FirstOrDefaultAsync(x => x.EntryId == id && x.IsActive, ct);
-            if (e == null) return Results.NotFound();
-            if (await ApplyEntryAsync(e, e.Plan!.Name, r, sf, ct) is { } err) return Results.BadRequest(new { error = err });
-            await db.SaveChangesAsync(ct);
-            return Results.Ok(new { ok = true });
-        });
-        admin.MapDelete("/catalog/entries/{id:int}", async (int id, AppDbContext db) =>
-        {
-            var e = await db.CatalogEntries.FirstOrDefaultAsync(x => x.EntryId == id && x.IsActive);
-            if (e == null) return Results.NotFound();
-            e.IsActive = false; await db.SaveChangesAsync();
-            return Results.Ok(new { ok = true });
-        });
 
-        // ---------- catalog
+                HttpResponseMessage resp;
+                try { resp = await fs.SendAsync(req, ct); }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+                {
+                    return Results.Json(new { error = "FileSync could not be reached.", message = "FileSync could not be reached." }, statusCode: 502);
+                }
+
+                using (resp)
+                {
+                    if (FileSyncProxyRules.ShouldAudit(ctx.Request.Method, path))
+                    {
+                        // The change is already made in FileSync; a failed audit write must not turn that into an error for the admin
+                        try
+                        {
+                            db.AdminAudits.Add(new AdminAudit { UserId = um.GetUserId(ctx.User), Action = $"{ctx.Request.Method} {path}", Status = (int)resp.StatusCode, CreatedUtc = DateTime.UtcNow });
+                            await db.SaveChangesAsync(CancellationToken.None);
+                        }
+                        catch (Exception ex) { ctx.RequestServices.GetRequiredService<ILogger<AdminAudit>>().LogError(ex, "Could not record the admin audit entry for {Method} {Path}", ctx.Request.Method, path); }
+                    }
+
+                    ctx.Response.StatusCode = (int)resp.StatusCode;
+                    if (resp.Content.Headers.ContentType != null) ctx.Response.ContentType = resp.Content.Headers.ContentType.ToString();
+                    if (resp.Content.Headers.ContentDisposition != null) ctx.Response.Headers.ContentDisposition = resp.Content.Headers.ContentDisposition.ToString();
+                    await resp.Content.CopyToAsync(ctx.Response.Body, ct);
+                }
+                return Results.Empty;
+            }).RequireRateLimiting("proxy");
+
+        // ---------- plans, folders, files (signed-in users). The plans and folders come from FileSync's jobs.
         var auth = api.MapGroup("").RequireAuthorization();
-        auth.MapGet("/plans", async (AppDbContext db) =>
+        auth.AddEndpointFilter(async (ctx, next) =>
         {
-            var plans = await db.HealthPlans.Where(p => p.IsActive).Include(p => p.Entries).OrderBy(p => p.SortOrder).ThenBy(p => p.PlanId).ToListAsync();
-            return plans.Select(p => new { id = p.PlanId, name = p.Name,
-                hasDownload = p.Entries.Any(e => e.IsActive && e.Direction == Direction.Download),
-                hasUpload = p.Entries.Any(e => e.IsActive && e.Direction == Direction.Upload) });
+            try { return await next(ctx); }
+            catch (FileSyncUnavailableException ex) { return Results.Json(new { error = ex.Message, code = "filesync_unavailable" }, statusCode: 503); }
         });
-        auth.MapGet("/plans/{id:int}/entries", async (int id, string direction, AppDbContext db) =>
-        {
-            if (!Enum.TryParse<Direction>(direction, true, out var d)) return Results.BadRequest(new { error = "direction must be Download or Upload" });
-            var all = await db.CatalogEntries.Where(e => e.PlanId == id && e.Direction == d && e.IsActive).OrderBy(e => e.EntryId).ToListAsync();
-            // the same ShareFile folder reached through several accounts is shown once
-            return Results.Ok(all.GroupBy(e => e.SharefileFolderId ?? e.SharefileDisplayPath).Select(g => EntryDto(g.First())));
-        });
-        auth.MapGet("/entries/{id:int}", async (int id, AppDbContext db) =>
-            await db.CatalogEntries.Include(e => e.Plan).FirstOrDefaultAsync(e => e.EntryId == id && e.IsActive) is { } e
-                ? Results.Ok(new { entry = EntryDto(e), plan = e.Plan!.Name }) : Results.NotFound());
 
-        auth.MapGet("/entries/{id:int}/files", async (int id, string? folder, string? search, int? page, int? pageSize, bool? refresh, AppDbContext db, IShareFileService sf, CancellationToken ct) =>
+        auth.MapGet("/plans", async (bool? refresh, IFileSyncClient fs, ClaimsPrincipal me, CancellationToken ct) =>
         {
-            var e = await db.CatalogEntries.FirstOrDefaultAsync(x => x.EntryId == id && x.IsActive, ct);
-            if (e == null) return Results.NotFound();
-            if (e.SharefileFolderId == null) return Results.Json(new { error = "This folder hasn't been linked to ShareFile yet. Ask an admin to add its ShareFile link in Settings." }, statusCode: 503);
+            var s = await fs.GetCatalogAsync(refresh == true && me.IsInRole(Roles.SuperAdmin), ct);
+            return Results.Ok(new
+            {
+                stale = s.Stale, fetchedUtc = s.FetchedUtc,
+                plans = s.Plans.Select(p => new
+                {
+                    key = p.Key, name = p.Name,
+                    hasDownload = p.Folders.Any(f => f.Direction == "Download"),
+                    hasUpload = p.Folders.Any(f => f.Direction == "Upload")
+                })
+            });
+        });
+
+        auth.MapGet("/plans/{planKey}", async (string planKey, IFileSyncClient fs, CancellationToken ct) =>
+        {
+            var s = await fs.GetCatalogAsync(false, ct);
+            var plan = FindPlan(s, planKey);
+            if (plan == null) return Results.NotFound(new { error = "That health plan isn't available." });
+            return Results.Ok(new { key = plan.Key, name = plan.Name, stale = s.Stale, folders = plan.Folders.Select(FolderDto) });
+        });
+
+        auth.MapGet("/plans/{planKey}/folders/{folderKey}/files", async (string planKey, string folderKey, string? folder, string? search, int? page, int? pageSize, bool? refresh,
+            IFileSyncClient fs, IShareFileService sf, CancellationToken ct) =>
+        {
+            var s = await fs.GetCatalogAsync(false, ct);
+            var plan = FindPlan(s, planKey); var f = FindFolder(plan, folderKey);
+            if (plan == null || f == null) return Results.NotFound(new { error = "That folder isn't available." });
             try
             {
-                if (!TryResolveFolder(e, folder, out var target, out var rel)) return Results.BadRequest(new { error = "That folder isn't part of this plan." });
+                if (!TryResolveFolder(planKey, f, folder, out var target, out var rel)) return Results.BadRequest(new { error = "That folder isn't part of this plan." });
                 var (items, at) = await ListCached(sf, target, refresh == true, ct);
                 var subfolders = new List<object>();
-                foreach (var f in items.Where(i => i.IsFolder).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase))
-                    {
-                        SeenFolders[$"{id}:{f.Id}"] = rel == "" ? f.Name : rel + "/" + f.Name;
-                        if (string.IsNullOrWhiteSpace(search) || f.Name.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase)) subfolders.Add(new { id = f.Id, name = f.Name });
-                    }
+                foreach (var sub in items.Where(i => i.IsFolder).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    SeenFolders[SeenKey(planKey, f, sub.Id)] = rel == "" ? sub.Name : rel + "/" + sub.Name;
+                    if (string.IsNullOrWhiteSpace(search) || sub.Name.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase)) subfolders.Add(new { id = sub.Id, name = sub.Name });
+                }
                 var q = items.Where(i => !i.IsFolder);
                 if (!string.IsNullOrWhiteSpace(search)) q = q.Where(i => i.Name.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase));
                 var sorted = q.OrderByDescending(i => i.Modified).ThenBy(i => i.Name).ToList();
                 var folderLink = await sf.GetWebLinkAsync(target, ct);
                 var size = Math.Clamp(pageSize ?? 25, 1, 100); var pg = Math.Max(page ?? 1, 1);
                 var pageItems = sorted.Skip((pg - 1) * size).Take(size).ToList();
-                return Results.Ok(new { total = sorted.Count, page = pg, pageSize = size, refreshedUtc = at, folderLink, folders = subfolders, isRoot = rel == "", location = Location(e, rel),
+                return Results.Ok(new { plan = plan.Name, label = f.Label, direction = f.Direction, stale = s.Stale,
+                    total = sorted.Count, page = pg, pageSize = size, refreshedUtc = at, folderLink, folders = subfolders, isRoot = rel == "",
+                    location = new { shareFilePath = JoinPath(f.ShareFileDisplayPath, rel) },
                     items = pageItems.Select(i => new { id = i.Id, name = i.Name, size = i.Size, modifiedUtc = i.Modified }) });
             }
             catch (ShareFileNotConnectedException ex) { return Results.Json(new { error = ex.Message, code = "disconnected" }, statusCode: 503); }
             catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException) { return Results.Json(new { error = "ShareFile could not be reached: " + ex.Message }, statusCode: 502); }
         });
 
-        auth.MapGet("/entries/{id:int}/exists", async (int id, string name, string? folder, AppDbContext db, IShareFileService sf, CancellationToken ct) =>
+        auth.MapGet("/plans/{planKey}/folders/{folderKey}/exists", async (string planKey, string folderKey, string name, string? folder,
+            IFileSyncClient fs, IShareFileService sf, CancellationToken ct) =>
         {
-            var e = await db.CatalogEntries.FirstOrDefaultAsync(x => x.EntryId == id && x.IsActive, ct);
-            if (e?.SharefileFolderId == null) return Results.NotFound();
-            if (!TryResolveFolder(e, folder, out var tgt, out _)) return Results.BadRequest(new { error = "That folder isn't part of this plan." });
+            var s = await fs.GetCatalogAsync(false, ct);
+            var f = FindFolder(FindPlan(s, planKey), folderKey);
+            if (f == null) return Results.NotFound();
+            if (!TryResolveFolder(planKey, f, folder, out var tgt, out _)) return Results.BadRequest(new { error = "That folder isn't part of this plan." });
             var (items, _) = await ListCached(sf, tgt, true, ct);
             return Results.Ok(new { exists = items.Any(i => !i.IsFolder && i.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) });
         });
 
-        auth.MapPost("/entries/{id:int}/uploads", async (int id, HttpRequest req, AppDbContext db, IShareFileService sf, UserManager<AppUser> um, ClaimsPrincipal me, IConfiguration cfg, CancellationToken ct) =>
+        auth.MapPost("/plans/{planKey}/folders/{folderKey}/uploads", async (string planKey, string folderKey, HttpRequest req, AppDbContext db, IFileSyncClient fs, IShareFileService sf,
+            UserManager<AppUser> um, ClaimsPrincipal me, IConfiguration cfg, CancellationToken ct) =>
         {
-            var e = await db.CatalogEntries.FirstOrDefaultAsync(x => x.EntryId == id && x.IsActive, ct);
-            if (e == null) return Results.NotFound();
-            if (e.Direction != Direction.Upload || e.SharefileFolderId == null) return Results.BadRequest(new { error = "Uploads aren't available for this folder." });
+            var s = await fs.GetCatalogAsync(false, ct);
+            var plan = FindPlan(s, planKey); var f = FindFolder(plan, folderKey);
+            if (plan == null || f == null) return Results.NotFound(new { error = "That folder isn't available." });
+            if (f.Direction != "Upload") return Results.BadRequest(new { error = "Uploads aren't available for this folder." });
             var form = await req.ReadFormAsync(ct);
             var file = form.Files.FirstOrDefault();
             var overwrite = form["overwrite"] == "true";
-            if (!TryResolveFolder(e, form["folder"].ToString(), out var target, out var rel)) return Results.BadRequest(new { error = "That folder isn't part of this plan." });
+            if (!TryResolveFolder(planKey, f, form["folder"].ToString(), out var target, out var rel)) return Results.BadRequest(new { error = "That folder isn't part of this plan." });
             if (file == null || file.Length == 0) return Results.BadRequest(new { error = "Empty files can't be uploaded." });
             var name = SanitizeName(file.FileName);
             if (name == null) return Results.BadRequest(new { error = "That file name isn't allowed." });
-            var max = e.MaxSizeBytes ?? cfg.GetValue<long?>("Upload:MaxBytes") ?? 500L * 1024 * 1024;
+            var max = cfg.GetValue<long?>("Upload:MaxBytes") ?? 500L * 1024 * 1024;
             if (file.Length > max) return Results.BadRequest(new { error = $"File is larger than the {max / 1024 / 1024} MB limit." });
-            if (!string.IsNullOrWhiteSpace(e.AllowedExtensions))
+            var allowedExt = cfg["Upload:AllowedExtensions"];
+            if (!string.IsNullOrWhiteSpace(allowedExt))
             {
-                var allowed = e.AllowedExtensions.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(x => x.TrimStart('.').ToLowerInvariant());
+                var allowed = allowedExt.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(x => x.TrimStart('.').ToLowerInvariant());
                 if (!allowed.Contains(Path.GetExtension(name).TrimStart('.').ToLowerInvariant()))
-                    return Results.BadRequest(new { error = $"Only these file types are allowed: {e.AllowedExtensions}." });
+                    return Results.BadRequest(new { error = $"Only these file types are allowed: {allowedExt}." });
             }
             var uid = um.GetUserId(me)!;
-            var audit = new UploadAudit { UserId = uid, EntryId = id, FileName = rel == "" ? name : rel + "/" + name, SizeBytes = file.Length, Status = "Started", CreatedUtc = DateTime.UtcNow };
+            var audit = new UploadAudit { UserId = uid, PlanName = plan.Name, FolderLabel = f.Label, SharefileFolderId = target,
+                FileName = rel == "" ? name : rel + "/" + name, SizeBytes = file.Length, Status = "Started", CreatedUtc = DateTime.UtcNow };
             db.UploadAudits.Add(audit);
             try
             {
@@ -379,70 +393,25 @@ public static class EndpointsExt
 
     // ---------- helpers
     private static string JoinPath(string baseP, string rel) => string.IsNullOrEmpty(rel) ? baseP : baseP.TrimEnd('/') + "/" + rel;
-    private static object Location(CatalogEntry e, string rel) => new
-    {
-        shareFilePath = JoinPath(e.SharefileDisplayPath, rel),
-        remote = rel == "" ? e.RemoteDisplay : (e.RemoteKind == RemoteKind.Sftp
-            ? $"{e.RemoteHost}:{e.RemotePort} {JoinPath(e.RemotePath ?? "/", rel)}"
-            : $"{e.PortalName} {JoinPath(e.RemotePath ?? "/", rel)}".Trim())
-    };
-    private static readonly System.Text.RegularExpressions.Regex FolderIdRx = new(@"(?<![0-9A-Za-z_-])(fo[0-9A-Za-z_-]{6,})", System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    /// <summary>Pulls the ShareFile folder id (starts with "fo") out of a pasted web link; null if there is none.</summary>
-    internal static string? ParseFolderId(string? link)
-    {
-        var m = FolderIdRx.Match(link ?? "");
-        return m.Success ? m.Groups[1].Value : null;
-    }
+    private static CatalogPlanDto? FindPlan(CatalogSnapshot s, string planKey) =>
+        s.Plans.FirstOrDefault(p => p.Key.Equals(planKey, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Validates the request and fills the entry. The ShareFile link is required and must point at a folder the connected account can open.</summary>
-    internal static async Task<string?> ApplyEntryAsync(CatalogEntry e, string planName, EntryReq r, IShareFileService sf, CancellationToken ct)
-    {
-        if (!Enum.TryParse<Direction>(r.Direction, true, out var dir)) return "Choose Download or Upload.";
-        if (!Enum.TryParse<RemoteKind>(r.RemoteKind, true, out var kind)) return "Choose SFTP or Portal.";
-        var label = string.IsNullOrWhiteSpace(r.Label) ? planName : r.Label.Trim();   // default label = the health plan name
-        if (label.Length > 100) return "The label is too long (up to 100 characters).";
-        var link = r.ShareFileLink?.Trim() ?? "";
-        if (link.Length == 0) return "The ShareFile folder link is required.";
-        var folderId = ParseFolderId(link);
-        if (folderId == null) return "That doesn't look like a ShareFile folder link. Open the folder in ShareFile and copy the address (it contains an id starting with “fo”).";
-        if (kind == RemoteKind.Sftp && string.IsNullOrWhiteSpace(r.RemoteHost)) return "Enter the SFTP host.";
-        if (kind == RemoteKind.Portal && string.IsNullOrWhiteSpace(r.PortalName)) return "Enter the portal name.";
-        if (r.RemotePort is < 1 or > 65535) return "The port must be between 1 and 65535.";
-        if ((r.Username?.Length ?? 0) > 200) return "Username is too long.";
-        SfItem? item;
-        try { item = await sf.GetItemAsync(folderId, ct); }
-        catch (Exception ex) { return $"Couldn't check the link in ShareFile: {ex.Message}"; }
-        if (item == null) return "ShareFile can't find that folder with the connected account. Check the link and that the account has access.";
-        if (!item.IsFolder) return "That link points to a file, not a folder.";
-        string? T(string? v) => string.IsNullOrWhiteSpace(v) ? null : v.Trim();
-        e.Direction = dir; e.Label = label; e.RemoteKind = kind;
-        e.SharefileFolderId = item.Id;
-        e.SharefileDisplayPath = T(r.ShareFilePath) ?? (dir == Direction.Upload ? $"Shared Folders/SFTP Uploads/{planName}" : $"Shared Folders/SFTP Drop {planName}");
-        e.RemoteHost = kind == RemoteKind.Sftp ? T(r.RemoteHost) : null;
-        e.RemotePort = kind == RemoteKind.Sftp ? r.RemotePort ?? 22 : null;
-        e.RemotePath = T(r.RemotePath);
-        e.PortalName = kind == RemoteKind.Portal ? T(r.PortalName) : null;
-        e.RemoteNote = T(r.RemoteNote);
-        e.RemoteUsername = T(r.Username);
-        return null;
-    }
+    private static CatalogFolderDto? FindFolder(CatalogPlanDto? plan, string folderKey) =>
+        plan?.Folders.FirstOrDefault(f => f.Key.Equals(folderKey, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Resolves the folder the user is in. Only the entry root or folders reached by listing it are allowed.</summary>
-    private static bool TryResolveFolder(CatalogEntry e, string? folder, out string target, out string rel)
+    private static object FolderDto(CatalogFolderDto f) => new { key = f.Key, label = f.Label, direction = f.Direction, shareFilePath = f.ShareFileDisplayPath };
+
+    private static string SeenKey(string planKey, CatalogFolderDto f, string folderId) => $"{planKey.ToLowerInvariant()}/{f.Key}:{folderId}";
+
+    /// <summary>Resolves the folder the user is in. Only the folder's root or folders reached by listing it are allowed.</summary>
+    private static bool TryResolveFolder(string planKey, CatalogFolderDto f, string? folder, out string target, out string rel)
     {
-        target = e.SharefileFolderId!; rel = "";
-        if (string.IsNullOrEmpty(folder) || folder == e.SharefileFolderId) return true;
-        if (!SeenFolders.TryGetValue($"{e.EntryId}:{folder}", out var r)) return false;
+        target = f.ShareFileFolderId; rel = "";
+        if (string.IsNullOrEmpty(folder) || folder == f.ShareFileFolderId) return true;
+        if (!SeenFolders.TryGetValue(SeenKey(planKey, f, folder), out var r)) return false;
         target = folder; rel = r; return true;
     }
-
-    private static object EntryDto(CatalogEntry e) => new
-    {
-        id = e.EntryId, label = e.Label, direction = e.Direction.ToString(), shareFilePath = e.SharefileDisplayPath,
-        remoteKind = e.RemoteKind.ToString(), remote = e.RemoteDisplay, remoteNote = e.RemoteNote, linked = e.SharefileFolderId != null,
-        allowedExtensions = e.AllowedExtensions, maxSizeBytes = e.MaxSizeBytes
-    };
 
     private static object InviteDto(InviteResult r, bool emailOnly) => new
     {

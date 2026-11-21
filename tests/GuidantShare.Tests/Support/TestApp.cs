@@ -30,14 +30,16 @@ public class TestApp : WebApplicationFactory<Program>
     public const string Password = "Correct-Horse-Battery-9";
     public string Dir { get; }
     public CapturingEmail Email { get; } = new();
+    public FakeFileSync FileSync { get; }
     private readonly Func<IServiceProvider, IShareFileService> _shareFile;
     private readonly Dictionary<string, string?> _oldEnv = new();
 
-    public TestApp(IShareFileService shareFile) : this(_ => shareFile) { }
-    public TestApp(Func<IServiceProvider, IShareFileService> shareFile, string? dir = null)
+    public TestApp(IShareFileService shareFile, FakeFileSync? fileSync = null) : this(_ => shareFile, null, fileSync) { }
+    public TestApp(Func<IServiceProvider, IShareFileService> shareFile, string? dir = null, FakeFileSync? fileSync = null)
     {
         Dir = dir ?? Path.Combine(Path.GetTempPath(), "gs-tests-" + Guid.NewGuid().ToString("N"));
         _shareFile = shareFile;
+        FileSync = fileSync ?? new FakeFileSync();
         // Program.cs reads these before the host exists, so environment variables are the dependable way in.
         // Tests run one at a time (see AssemblyInfo), so the process-wide variables don't collide.
         Set("Data__Dir", Dir); Set("Data__KeyPath", Path.Combine(Dir, "keys", "master.key"));
@@ -52,6 +54,7 @@ public class TestApp : WebApplicationFactory<Program>
         builder.ConfigureServices(s =>
         {
             s.RemoveAll<IShareFileService>(); s.AddSingleton(_shareFile);
+            s.RemoveAll<IFileSyncClient>(); s.AddSingleton<IFileSyncClient>(FileSync);
             s.RemoveAll<IEmailSender>(); s.AddSingleton<IEmailSender>(Email);
         });
     }
@@ -73,25 +76,11 @@ public class TestApp : WebApplicationFactory<Program>
         await um.AddToRoleAsync(u, role);
     }
 
-    /// <summary>Adds a plan with one entry straight into the database (skips the admin API).</summary>
-    public async Task<int> SeedEntryAsync(string plan, Direction dir, string folderId, string label = "Main", string path = "/", string? username = "svc-user",
-        string? allowed = null, long? maxBytes = null)
+    /// <summary>Puts a folder in the fake FileSync catalog and returns the URL prefix the app uses for it.</summary>
+    public string Seed(string plan, Direction dir, string shareFileFolderId, string label = "Main")
     {
-        using var scope = Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var p = db.HealthPlans.FirstOrDefault(x => x.Name == plan && x.IsActive);
-        if (p == null) { p = new HealthPlan { Name = plan, SortOrder = db.HealthPlans.Count() + 1 }; db.HealthPlans.Add(p); }
-        var e = new CatalogEntry { Plan = p, Direction = dir, Label = label, SharefileFolderId = folderId, SharefileDisplayPath = $"Shared Folders/{plan}",
-            RemoteKind = RemoteKind.Sftp, RemoteHost = "sftp.example.com", RemotePort = 22, RemotePath = path, RemoteUsername = username,
-            AllowedExtensions = allowed, MaxSizeBytes = maxBytes };
-        db.CatalogEntries.Add(e); await db.SaveChangesAsync();
-        return e.EntryId;
-    }
-
-    public int PlanId(string name)
-    {
-        using var scope = Services.CreateScope();
-        return scope.ServiceProvider.GetRequiredService<AppDbContext>().HealthPlans.First(p => p.Name == name).PlanId;
+        var f = FileSync.AddFolder(plan, label, dir, shareFileFolderId);
+        return $"/api/plans/{FakeFileSync.Slug(plan)}/folders/{f.Key}";
     }
 
     public T Query<T>(Func<AppDbContext, T> q)
@@ -142,14 +131,15 @@ public class ApiClient
     public async Task<ApiResult> Login(string email, string password = TestApp.Password) =>
         await Post("/api/auth/login", new { email, password });
 
-    public async Task<ApiResult> Upload(int entryId, string fileName, byte[] bytes, string? folder = null, bool overwrite = false)
+    /// <param name="folderUrl">What <see cref="TestApp.Seed"/> returned, e.g. /api/plans/aetna/folders/upload-main</param>
+    public async Task<ApiResult> Upload(string folderUrl, string fileName, byte[] bytes, string? folder = null, bool overwrite = false)
     {
         var form = new MultipartFormDataContent();
         var file = new ByteArrayContent(bytes); file.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         form.Add(file, "file", fileName);
         if (folder != null) form.Add(new StringContent(folder), "folder");
         if (overwrite) form.Add(new StringContent("true"), "overwrite");
-        var req = new HttpRequestMessage(HttpMethod.Post, $"/api/entries/{entryId}/uploads") { Content = form };
+        var req = new HttpRequestMessage(HttpMethod.Post, $"{folderUrl}/uploads") { Content = form };
         req.Headers.Add("X-CSRF-TOKEN", await Csrf());
         return await Read(await _http.SendAsync(req));
     }
@@ -163,6 +153,6 @@ public class ApiClient
 /// <summary>A second host over an existing data folder, i.e. the app after a restart.</summary>
 public class TestAppOnDir : TestApp
 {
-    public TestAppOnDir(string dir, Func<IServiceProvider, IShareFileService> shareFile) : base(shareFile, dir) { }
+    public TestAppOnDir(string dir, Func<IServiceProvider, IShareFileService> shareFile, FakeFileSync? fileSync = null) : base(shareFile, dir, fileSync) { }
     protected override bool OwnsDir => false;
 }
