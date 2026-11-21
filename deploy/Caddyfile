@@ -1,0 +1,37 @@
+# GuidantShare reverse proxy (Caddy) on SFTPSRVR.
+# Only this proxy is public. GuidantShare.Api listens on 127.0.0.1:5080 and FileSync on localhost:5000; never expose them.
+# Caddy gets and renews the TLS certificate automatically (ports 80 and 443 must reach this machine).
+# Written without being run on the VM: validate first with `caddy validate --config Caddyfile`.
+
+guidantshare.guidantmso.com {
+	encode zstd gzip
+
+	# The API (it adds its own security headers)
+	handle /api/* {
+		reverse_proxy 127.0.0.1:5080 {
+			# large uploads can take a while
+			transport http {
+				read_timeout 15m
+				write_timeout 15m
+			}
+		}
+	}
+
+	handle /health {
+		reverse_proxy 127.0.0.1:5080
+	}
+
+	# The single-page app: static files, any other path falls back to index.html
+	handle {
+		root * C:\Services\GuidantShare\web
+		header {
+			Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'"
+			X-Content-Type-Options nosniff
+			X-Frame-Options DENY
+			Referrer-Policy no-referrer
+			Strict-Transport-Security "max-age=31536000"
+		}
+		try_files {path} /index.html
+		file_server
+	}
+}
