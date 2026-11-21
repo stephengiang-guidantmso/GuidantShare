@@ -6,7 +6,6 @@ obj/
 
 # web
 node_modules/
-src/GuidantShare.Api/wwwroot/
 
 # runtime data: database, encryption key, logs (never commit)
 data/

@@ -97,10 +97,10 @@ See the [Glossary](README.md#glossary). The most important: a **plan** is one ca
 ### Build and run on a developer machine
 
 ```bash
-# 1. Build the UI (writes into src/GuidantShare.Api/wwwroot, which is not committed)
-cd src/GuidantShare.Web && npm install && npm run build && cd ../..
+# 1. Install the web dependencies and start the web dev server (http://localhost:5173)
+cd src/GuidantShare.Web && npm install && npm run dev
 
-# 2. Start the API in the background on http://localhost:5080
+# 2. In another terminal start the API in the background on http://localhost:5080 (it serves no UI)
 scripts/system.sh --start
 ```
 

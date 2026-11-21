@@ -148,7 +148,7 @@ Ready-made files are in `deploy/`: `Caddyfile`, `publish-windows.ps1`, `install-
 deploy\publish-windows.ps1        # dotnet publish + npm ci + npm run build into C:\Services\GuidantShare
 ```
 
-The API and the SPA are separate: the API is published to `api\`, the SPA build to `web\` (served by Caddy). The API can still serve a SPA from its own `wwwroot` for development, but production does not rely on it.
+The API and the SPA are separate: the API is published to `api\`, the SPA build to `web\` (served by Caddy). The API serves no web files at all.
 
 ### Windows service
 
@@ -193,7 +193,7 @@ Start FileSync, then the API; create the superadmin, connect ShareFile, and set 
 | Build fails with `MSB3374 ... last write time ... cannot be set` | `obj/` or `bin/` files were created by a different user | Delete `bin/` and `obj/` in each project (they are regenerated), then build as the account that runs the app. Use one account for building and running |
 | `address already in use` | Another process owns the port | `scripts/system.sh --stop`, or change `Urls` |
 | App exits right away | Read `src/GuidantShare.Api/data/logs/console.out` | Look for missing key permissions, an unreadable database, or a bad setting |
-| Blank page or old UI | `wwwroot` is missing or stale | `cd src/GuidantShare.Web && npm run build`, then restart |
+| Blank page or old UI | The browser cached an old copy, or Caddy points at the wrong folder | Hard refresh (Ctrl+Shift+R); in dev open http://localhost:5173; in production check the `root` in the Caddyfile and that `publish-windows.ps1` ran |
 
 ### Signing in
 

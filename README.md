@@ -27,10 +27,10 @@ The script finds the app by its port (no pid files) and writes console output to
 
 The API needs FileSync's address and key to list plans: `FileSync__BaseUrl` (default `http://localhost:5000`) and `FileSync__ApiKey` (the same value as FileSync's `Api__Key`). Without a reachable FileSync there are no plans to show.
 
-Build the UI for the dev API to serve (`wwwroot` is not committed), or use the Vite dev server:
+The API serves no web files. In development open the Vite dev server (it forwards `/api` to the API on 5080):
 
 ```bash
-cd src/GuidantShare.Web && npm install && npm run build     # or: npm run dev  (port 5173, proxies /api to 5080)
+cd src/GuidantShare.Web && npm install && npm run dev     # http://localhost:5173
 ```
 
 Dotnet is expected on the `PATH` or in `~/.dotnet`.

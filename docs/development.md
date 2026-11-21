@@ -49,7 +49,7 @@ The API uses minimal-API endpoints grouped as public (`api`), signed-in (`auth`)
 cd src/GuidantShare.Web
 npm install
 npm run dev            # Vite dev server; /api and /health are proxied to http://localhost:5080
-npm run build          # type-checks (tsc) and writes to ../GuidantShare.Api/wwwroot
+npm run build          # type-checks (tsc) and writes to dist/ (production builds pass --outDir)
 npm run lint
 ```
 

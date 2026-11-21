@@ -122,8 +122,6 @@ app.Use(async (ctx, next) =>
     await next();
 });
 app.UseRateLimiter();
-app.UseDefaultFiles();
-app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -139,9 +137,8 @@ app.Use(async (ctx, next) =>
 });
 
 app.MapEndpoints();
-// An unknown /api path is a 404, never the single-page app's index.html
-app.MapFallback("/api/{**rest}", () => Results.NotFound(new { error = "Not found." }));
-app.MapFallbackToFile("index.html");
+// The API serves no web files: the UI is served by Vite in development and by the reverse proxy in production
+app.MapFallback(() => Results.NotFound(new { error = "Not found." }));
 await StartupChecks.RunAsync(app);
 app.Run();
 return 0;
