@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, fmtDate } from '../api'
-import CatalogEditor from './CatalogEditor'
 
-export default function ShareFileAdmin() {
+export default function Settings() {
   const [sp] = useSearchParams()
   const [st, setSt] = useState<any>(null); const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [f, setF] = useState({ subdomain: '', clientId: '', clientSecret: '', redirectUri: '' })
@@ -11,7 +10,7 @@ export default function ShareFileAdmin() {
   const load = () => api('/api/sharefile/status').then(s => { window.dispatchEvent(new Event('sf-status-changed')); setSt(s); setF(x => ({ ...x, subdomain: s.subdomain ?? '', clientId: s.clientId ?? '', redirectUri: s.redirectUri ?? `${location.origin}/api/sharefile/callback` })) })
   useEffect(() => { load() }, [])
   useEffect(() => {
-    const r = sp.get('result'); if (r) setMsg(r === 'connected' ? { ok: true, text: 'ShareFile connected for the whole team.' } : { ok: false, text: 'ShareFile connection failed. Try again.' })
+    const r = sp.get('result'); if (r) setMsg(r === 'connected' ? { ok: true, text: 'ShareFile connected for GuidantShare.' } : { ok: false, text: 'ShareFile connection failed. Try again.' })
   }, [sp])
   const run = async (fn: () => Promise<any>) => { setMsg(null); try { await fn() } catch (x: any) { setMsg({ ok: false, text: x.message }) } load() }
   if (!st) return <p className="muted">Loading…</p>
@@ -22,7 +21,7 @@ export default function ShareFileAdmin() {
       <h1>Settings</h1>
       <h2>ShareFile connection</h2>
       <div className={`card status ${st.connected ? 'good' : 'bad'}`}>
-        {st.connected ? <>✅ Connected as the owner's ShareFile account on <b>{st.subdomain}.sharefile.com</b>. Connected by {st.connectedBy} on {fmtDate(st.connectedUtc)}. This connection is shared by everyone on the team.</>
+        {st.connected ? <>✅ Connected as the owner's ShareFile account on <b>{st.subdomain}.sharefile.com</b>. Connected by {st.connectedBy} on {fmtDate(st.connectedUtc)}. This is GuidantShare's own connection; FileSync has a separate one.</>
           : <>⚠️ Not connected. {st.configured ? 'Click “Connect to ShareFile” and sign in with the owner account.' : 'Save the ShareFile app settings below first.'}</>}
         {st.error && <p className="error">{st.error}</p>}
       </div>
@@ -49,13 +48,12 @@ export default function ShareFileAdmin() {
           <p className="muted">After approving, ShareFile shows a page with a code (or an address containing <code>code=</code>). Paste it here:</p>
           <div className="row">
             <input placeholder="Paste code or full address" value={code} onChange={e => setCode(e.target.value)} />
-            <button onClick={() => run(async () => { await api('/api/sharefile/exchange', { method: 'POST', body: { code } }); setCode(''); setMsg({ ok: true, text: 'ShareFile connected for the whole team.' }) })}>Finish connecting</button>
+            <button onClick={() => run(async () => { await api('/api/sharefile/exchange', { method: 'POST', body: { code } }); setCode(''); setMsg({ ok: true, text: 'ShareFile connected for GuidantShare.' }) })}>Finish connecting</button>
           </div></div>}
       </div>
 
-      <h2>3. Health plans and folders</h2>
-      <p className="muted">Everything users see on the home page comes from here. Each folder needs its ShareFile link. Usernames are login names only; passwords are never stored or shown.</p>
-      <CatalogEditor connected={st.connected} />
+      <h2>Health plans and folders</h2>
+      <p className="muted">These are no longer entered here. They come from the FileSync jobs: set each job's <b>Website Health Plan</b> and <b>Website Folder Name</b> in the <a href="/admin/filesync">FileSync</a> screen.</p>
     </>
   )
 }

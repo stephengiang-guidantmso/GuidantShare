@@ -1,9 +1,10 @@
 let csrf: string | null = null
 
-async function token() {
+export async function csrfToken() {
   if (!csrf) csrf = (await (await fetch('/api/auth/csrf', { credentials: 'same-origin' })).json()).token
   return csrf!
 }
+export function resetCsrf() { csrf = null }
 
 export class ApiError extends Error {
   status: number
@@ -14,14 +15,15 @@ export class ApiError extends Error {
 export async function api<T = any>(path: string, opts: { method?: string; body?: unknown; form?: FormData } = {}): Promise<T> {
   const method = opts.method ?? 'GET'
   const headers: Record<string, string> = {}
-  if (method !== 'GET') headers['X-CSRF-TOKEN'] = await token()
+  if (method !== 'GET') headers['X-CSRF-TOKEN'] = await csrfToken()
   let body: BodyInit | undefined
   if (opts.form) body = opts.form
   else if (opts.body !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(opts.body) }
   const res = await fetch(path, { method, headers, body, credentials: 'same-origin' })
-  if ((res.status === 400 && method !== 'GET') || path === '/api/auth/login' || path === '/api/auth/logout') csrf = null
+  if ((res.status === 400 && method !== 'GET') || path === '/api/auth/login' || path === '/api/auth/logout') resetCsrf()
   const text = await res.text()
-  const data = text ? JSON.parse(text) : null
+  let data: any = null
+  try { data = text ? JSON.parse(text) : null } catch { /* a proxy error page, not JSON */ }
   if (!res.ok) throw new ApiError(res.status, data?.error ?? `Request failed (${res.status})`, data?.code)
   return data as T
 }

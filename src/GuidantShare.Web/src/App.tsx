@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, lazy, Suspense, useContext, useEffect, useState } from 'react'
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { api } from './api'
 import { AcceptInvite, Forgot, Login, Reset } from './pages/AuthPages'
@@ -6,7 +6,10 @@ import Home from './pages/Home'
 import Plan from './pages/Plan'
 import Files from './pages/Files'
 import Users from './pages/Users'
-import ShareFileAdmin from './pages/ShareFileAdmin'
+import Settings from './pages/Settings'
+
+// The FileSync screens are only for SuperAdmins, so normal users never download them
+const FileSyncPage = lazy(() => import('./filesync/FileSyncPage'))
 
 export type Me = { id: string; email: string; role: string }
 const Ctx = createContext<{ me: Me | null; setMe: (m: Me | null) => void }>({ me: null, setMe: () => {} })
@@ -37,15 +40,17 @@ function Shell({ children }: { children: React.ReactNode }) {
         </Link>
         <div className="nav-actions">
           <NavLink to="/" end className="nav-btn">Health Plans</NavLink>
+          {isAdmin && <NavLink to="/admin/filesync" className="nav-btn">FileSync</NavLink>}
           {isAdmin && <NavLink to="/admin/users" className="nav-btn">Users</NavLink>}
-          {isAdmin && <NavLink to="/admin/sharefile" className="nav-btn">Settings</NavLink>}
+          {isAdmin && <NavLink to="/admin/settings" className="nav-btn">Settings</NavLink>}
           <button className="nav-btn" onClick={async () => { await api('/api/auth/logout', { method: 'POST' }); setMe(null); nav('/login') }}>Log out</button>
         </div>
       </nav>
       {isAdmin && health?.sharefile !== 'connected' && (
-        <div className="banner warn">ShareFile is not connected. <Link to="/admin/sharefile">Connect ShareFile</Link> so the team can see and send files.</div>
+        <div className="banner warn">ShareFile is not connected. <Link to="/admin/settings">Connect ShareFile</Link> so the team can see and send files.</div>
       )}
       {isAdmin && health?.email === 'misconfigured' && <div className="banner warn">Invite email is misconfigured. Check the Graph settings.</div>}
+      {isAdmin && health?.fileSync === 'unreachable' && <div className="banner warn">FileSync can't be reached. Health plans may be out of date and the FileSync screens won't load.</div>}
       <main>{children}</main>
     </div>
   )
@@ -68,11 +73,12 @@ export default function App() {
         <Route path="/forgot-password" element={<Forgot />} />
         <Route path="/reset-password" element={<Reset />} />
         <Route path="/" element={guard(<Home />)} />
-        <Route path="/plans/:planId" element={guard(<Plan />)} />
-        <Route path="/plans/:planId/:direction" element={guard(<Plan />)} />
-        <Route path="/entries/:entryId" element={guard(<Files />)} />
+        <Route path="/plans/:planKey" element={guard(<Plan />)} />
+        <Route path="/plans/:planKey/:direction" element={guard(<Plan />)} />
+        <Route path="/plans/:planKey/folders/:folderKey" element={guard(<Files />)} />
+        <Route path="/admin/filesync" element={guard(<Suspense fallback={<p className="muted">Loading…</p>}><FileSyncPage /></Suspense>, true)} />
         <Route path="/admin/users" element={guard(<Users />, true)} />
-        <Route path="/admin/sharefile" element={guard(<ShareFileAdmin />, true)} />
+        <Route path="/admin/settings" element={guard(<Settings />, true)} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Ctx.Provider>

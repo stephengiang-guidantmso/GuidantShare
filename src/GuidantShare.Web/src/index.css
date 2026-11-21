@@ -74,30 +74,14 @@ td select { padding: 5px 8px; margin: 0 }
 
 @media (max-width: 700px) { body { padding: 14px } .grid.two { grid-template-columns: 1fr } }
 
-/* matrix */
-.matrix td { vertical-align: top } .matrix tr.plan-start td { border-top: 2px solid var(--card-border) } .matrix .flow { white-space: nowrap; font-weight: 600; color: var(--text-secondary) }
-.tag { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600; line-height: 1.5; text-decoration: none; word-break: break-word }
-.tag-sf { background: var(--blue-subtle); color: var(--link); border: 1px solid var(--primary-blue) } .tag-sf:hover { background: var(--primary-blue); color: #fff }
-.tag-remote { background: var(--gray-bg); color: var(--text-secondary); border: 1px solid var(--gray-border) } .tag-off { background: var(--gray-bg); color: var(--text-muted); border: 1px dashed var(--gray-border) }
-
-.matrix th, .matrix td { text-align: left } .matrix td button.link { text-align: left; display: inline; font-size: .85rem; line-height: 1.5 }
-.matrix td:nth-child(1) { min-width: 130px } .matrix td:nth-child(3) { min-width: 190px; word-break: break-word } .matrix td .tag-remote { margin-right: 6px }
-.tag { border-radius: 8px; padding: 4px 10px; line-height: 1.45 }
-
 /* home: larger, centered plan cards */
 .home { max-width: 1200px; margin: 0 auto; text-align: center }
 .home h1 { font-size: 2rem; margin: 24px 0 28px }
 .home .grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; justify-content: center }
 .home .plan { font-size: 1.25rem; padding: 56px 20px; display: flex; align-items: center; justify-content: center }
 
-/* catalog editor form */
-.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px } .fields.hostport { grid-template-columns: 3fr 1fr }
-.modal { overflow-y: auto; align-items: start } .modal .card.wide { max-width: 640px; margin: 24px auto }
+/* modals */
+.modal { overflow-y: auto; align-items: start }
 
 /* settings: connect card */
 .connect-paste { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--card-border) } .connect-paste p { margin: 0 0 10px }
-
-/* every plan's table uses the same fixed column widths so columns line up from one plan to the next */
-.catalog { table-layout: fixed; width: 100% } .catalog th, .catalog td { overflow-wrap: anywhere; vertical-align: top }
-.catalog td.actions .row { flex-wrap: nowrap; gap: 6px; justify-content: flex-end } .catalog td.actions button { padding: 6px 10px }
-.catalog .tag { white-space: normal; display: inline-block; max-width: 100%; word-break: break-word }
