@@ -175,8 +175,11 @@ public class BrowseIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task When_FileSync_is_down_and_nothing_was_ever_loaded_users_get_a_clear_503()
     {
-        _app.FileSync.Down = true;
-        var r = await _user.Get("/api/plans");
+        // Its own app: FileSync must be down before the app starts, because startup already reads the catalog once
+        using var app = new TestApp(new FakeShareFile(), new FakeFileSync { Down = true });
+        await app.AddUserAsync("late@test.local", Roles.User);
+        var user = app.NewClient(); await user.Login("late@test.local");
+        var r = await user.Get("/api/plans");
         Assert.Equal(HttpStatusCode.ServiceUnavailable, r.Status); Assert.Equal("filesync_unavailable", r.Json.GetProperty("code").GetString());
     }
 }
