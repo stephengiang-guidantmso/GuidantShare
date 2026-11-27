@@ -110,7 +110,7 @@ Production runs on the Windows VM `SFTPSRVR`, next to FileSync. Three pieces:
 
 Only the proxy is reachable from the internet. Do not weaken that: never bind the API or FileSync to `0.0.0.0` and never open their ports in the firewall or the Azure network security group.
 
-For the one-time setup of the VM, the Azure and DNS steps and carrying the FileSync jobs over, follow the [Go-live guide](operations.md#go-live-from-scratch-clean-install-on-the-sftp-server-vm). This page is the reference.
+For the one-time setup of the VM, the Azure and DNS steps and carrying the FileSync jobs over, follow the [Go-live guide](operations.md#go-live-deploy-to-the-sftp-server-vm). This page is the reference.
 
 Ready-made files are in `deploy/`: `Caddyfile`, `publish-windows.ps1`, `install-api-service.ps1`. Review them before use; they were written without being run on the VM.
 
@@ -245,35 +245,13 @@ Start FileSync, then the API; create the superadmin, connect ShareFile, and set 
 3. `GET /health` output.
 4. The relevant lines from `data/logs/wrapper-YYYYMMDD.log` (remove invite or reset links first).
 
-## Go live from scratch: clean install on the SFTP server VM
+## Go live: deploy to the SFTP server VM
 
-How to set up `SFTPSRVR` (the Windows VM) from scratch, point `guidantshare.guidantmso.com` at it, and carry your **FileSync jobs** over to a clean FileSync. Production data is erased on purpose: a new FileSync database, a new GuidantShare database, new keys. Only the job *definitions* are saved and re-loaded.
+Deploys both repos to `SFTPSRVR`, first reachable only from your own IP under a free Azure DNS name, then (when the domain is ready) publicly. **FileSync is upgraded in place**: its `data\` folder holds the jobs, the encrypted passwords and ShareFile token, and the transfer ledger and file state. The new version only adds two columns. Do **not** wipe it: an empty database loses the passwords and makes every file look new, which can re-send files to partners. GuidantShare starts with an empty database.
 
-> **Written without being run on the VM.** Every command and screen name below is from documentation and the repo's scripts, not from a live run. Where a step depends on how your Azure subscription or Wix account is set up, it says so. Read the whole guide once before starting.
+Pick a quiet period: FileSync stops during the upgrade. Placeholders: `<FQDN>` = the Azure DNS name, `<HOMEIP>` = your PC's public IP (`curl.exe https://ifconfig.me` on your PC).
 
-### 0. The plan in one page
-
-| Part | What | Who | Downtime |
-|---|---|---|---|
-| A | Save the old jobs, the old plan list and notes on settings (old system still running) | you | none |
-| B | Azure public IP and firewall: let 443 (and 80) in | someone with rights on the VM's resource group | none |
-| C | DNS: the A record for `guidantshare.guidantmso.com` | whoever manages the Wix DNS (Sheel offered) | none |
-| D | FileSync: wipe, install the new version, import jobs, check each, enable | you | **transfers stop** until jobs are enabled again |
-| E | GuidantShare: install, connect ShareFile, create the admin | you | none |
-| F | Caddy (HTTPS) | you | none |
-| G | Verify from outside | you | none |
-| H | Cut over and clean up | you | none |
-
-Do A, B and C first (they have waiting time: DNS and access requests). Do D in a quiet period.
-
-Ports at the end (only `443`, and `80` for certificates, may be reachable from the internet):
-
-| Port | What | Reachable from |
-|---|---|---|
-| 443, 80 | Caddy | the internet |
-| 5080 | GuidantShare.Api | this machine only (`127.0.0.1`) |
-| 5000 | FileSync API | this machine only (`localhost`) |
-| 5173 | old FileSync dashboard | **retired**: remove it and its firewall rule |
+> Written without being run on the VM. Check each step's output before going on.
 
 ### The API key: where it lives and how to set it
 
@@ -292,252 +270,132 @@ Rules:
 - **To change (rotate) it:** generate a new value, update `Api__Key` on `FileSyncService` and `FileSync__ApiKey` on `GuidantShareApi` (re-run `install-api-service.ps1`), then restart both services. There is a short gap where plans show "unavailable" if you restart them one after the other.
 - **To check it:** `Invoke-RestMethod http://localhost:5000/api/workflows` without the key must fail with `401`; with `-Headers @{ "X-Api-Key" = $key }` it must work. `https://guidantshare.guidantmso.com/health` should then show `fileSync: ok`.
 
-### 1. What you need
+### Step 1. Azure portal
+1. Virtual machines → `SFTPSRVR` → **Overview** → click the **Public IP address**.
+2. **Configuration**: Assignment **Static**; **DNS name label** e.g. `guidant-sftp` → Save. Note `<FQDN>` (`guidant-sftp.<region>.cloudapp.azure.com`).
+3. VM → **Networking** (Network settings) → note whether there is an NSG on the NIC, the subnet, or both; add the rules to each. **Add inbound port rule** twice:
 
-- Administrator access on the VM (RDP).
-- On the Azure subscription, for the VM's resource group `SFTPSRVR-RG`: a role that can edit the VM's network settings (for example **Network Contributor**), or someone who has it. With only *Security Reader* the Networking page fails with an authorization error.
-- Access to wherever the DNS for `guidantmso.com` is managed (it was at Wix), or the person who has it.
-- The ShareFile owner account, and the ShareFile API apps' client ID and secret (FileSync's existing one; a second one for GuidantShare, see E2).
-- The Microsoft 365 (Entra) app for mail if you want invite emails and FileSync alert/code emails (see D5 and E5).
-- A password manager for the new secrets.
-- On the VM: .NET 10 SDK (to build) or the ASP.NET Core 10 runtime (to run published output), Git, and either Node.js (to build the web app on the VM) or a build made on another machine.
+| Name | Source | Source IP | Dest port | Protocol | Priority |
+|---|---|---|---|---|---|
+| Allow-HTTPS-Home | IP Addresses | `<HOMEIP>/32` | 443 | TCP | 300 |
+| Allow-HTTP | Any | | 80 | TCP | 310 |
 
-### A. Save what you want to keep (old system still running)
+Port 80 is open to Any because Let's Encrypt checks from its own addresses to issue the certificate; Caddy only answers that check and redirects there. No rule for 5000, 5080 or 5173. Leave the RDP rules as they are.
 
-Do this before wiping anything. Put the results in a folder such as `C:\Services\migration-<date>\` and keep it until you are happy with the new system.
-
-#### A1. Export the FileSync jobs
-
-From the FileSync repo on the VM (or any machine that can reach FileSync's API):
-
+### Step 2. Reachability test (changes nothing in FileSync)
+VM, PowerShell as Administrator:
 ```powershell
-cd C:\Services\FileSync\scripts      # or wherever the repo is
-.\Export-Jobs.ps1 -Out C:\Services\migration-<date>\jobs-export.json
+Get-NetTCPConnection -LocalPort 80,443 -State Listen -ErrorAction SilentlyContinue   # should print nothing (IIS etc.)
+New-NetFirewallRule -DisplayName "GuidantShare HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
+New-NetFirewallRule -DisplayName "GuidantShare HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -RemoteAddress <HOMEIP> -Action Allow
 ```
-
-(The old FileSync has no API key, so none is needed. With the new one add `-ApiKey`.)
-
-What it saves per job: name, direction, remote type (SFTP, Aetna, Champion, SCAN), polling and retry settings, include/exclude patterns, remote path, ShareFile folder id and display path, and the connection details **without the password**: host, port, user name, the learned host-key fingerprint and the private-key file *path*.
-
-What it deliberately does **not** save: passwords and key passphrases (FileSync never reveals them; you type them again during import) and private key files (copy those files yourself).
-
-#### A2. Save the old plan list (so jobs get their website plan and folder name automatically)
-
-If a GuidantShare with its hand-entered catalog is running somewhere, export its catalog as a CSV. The columns are what the import script matches on (ShareFile folder id + direction + user name). Stop that service or copy its `app.db` first so the file is consistent, then:
-
+Throwaway listener (answers only `/api/health`):
 ```powershell
-sqlite3 -readonly -header -csv app.db "SELECT p.Name AS Plan, e.Label, e.Direction, e.SharefileFolderId, e.RemoteUsername AS Username FROM CatalogEntries e JOIN HealthPlans p ON p.PlanId = e.PlanId WHERE e.IsActive = 1 AND p.IsActive = 1 ORDER BY p.Name, e.Direction, e.Label;" > C:\Services\migration-<date>\old-catalog.csv
+$l = [System.Net.HttpListener]::new(); $l.Prefixes.Add("http://+:80/"); $l.Start(); "listening, Ctrl+C to stop"
+try { while ($true) {
+  $t = $l.GetContextAsync(); while (-not $t.Wait(500)) {}
+  $c = $t.Result; "$($c.Request.RemoteEndPoint) $($c.Request.Url.AbsolutePath)"
+  if ($c.Request.Url.AbsolutePath -eq "/api/health") { $b = [Text.Encoding]::UTF8.GetBytes('{"status":"ok"}') } else { $c.Response.StatusCode = 404; $b = [byte[]]@() }
+  $c.Response.OutputStream.Write($b, 0, $b.Length); $c.Response.Close()
+} } finally { $l.Stop() }
 ```
+Your PC: `curl.exe http://<FQDN>/api/health` → `{"status":"ok"}`. Then Ctrl+C on the VM. If it hangs: check both NSGs ("Effective security rules"), the Windows rule, and `nslookup <FQDN>`. **Do not continue until this works.**
 
-(`sqlite3` is a small separate tool; if the VM does not have it, copy `app.db` to a machine that does. Do not open the live file with a read-write tool.) If there is no old GuidantShare, skip this: you will type *Plan* and *Folder name* on each job in the new FileSync screen, or in the JSON file.
-
-#### A3. Write down what is not in the export
-
-| Item | Where it lives now | In the clean install |
-|---|---|---|
-| FileSync's ShareFile connection | `C:\Services\FileSync\data` (encrypted) | Sign in again (D4) |
-| Graph mail settings (SCAN code reader, alert emails) | `C:\Services\FileSync\data\graph-mail.json` | Copy that one file to the new `data\` (D5). It holds the tenant/app/mailbox and alert recipients; its client secret was already moved into the encrypted database, so put the secret in the file again |
-| Private key files for key-based SFTP | paths shown in the job | Copy the files to the same paths |
-| Web-portal sign-in state (SCAN "remember this device") | `C:\Services\FileSync\data\browser-profiles` | Starts empty: SCAN will ask for a one-time code on the first run |
-| Master encryption key | `...\data\keys\master.key` | A new one is created; the old one is only needed to read the *old* database |
-| Service environment variables | the services' registry keys | Set again (D2, E4) |
-| Old transfer history (ledger, runs, 30-day archive) | `data\filesync.db`, `staging\` | Gone. Keep the old folder if you need to look something up |
-
-#### A4. Keep a full copy of the old data
-
-Stop `FileSyncService` (this pauses transfers, so pick the quiet period), copy `C:\Services\FileSync\data`, `C:\Services\FileSync\staging` and `C:\Services\FileSync\bin\appsettings.json` into the migration folder, and keep it somewhere safe. Do not copy the old `master.key` anywhere insecure: with the old database it decrypts every saved password.
-
-### B. Azure: public IP and the network rules
-
-1. **Find the VM.** Azure portal → *Virtual machines* → `SFTPSRVR` (resource group `SFTPSRVR-RG`, subscription "Azure subscription 1"). The default list showed other machines; search by name or filter by subscription.
-2. **Know your IPs.** On the VM's *Overview*, note the **Public IP address**. This is the address people will connect *to*. The address the partners see FileSync connecting *from* (`20.169.248.229` in your notes) is the outbound address. They may be the same, but confirm: on the VM run `curl.exe https://ifconfig.me` (outbound) and compare with the portal. Do not assume.
-3. **Make the public IP static.** Public IP resource → *Configuration* → Assignment **Static** → Save. If it is dynamic, the address can change when the VM is deallocated, which would break the DNS record and could break the partners' IP allow-lists.
-4. **Open 443 and 80.** VM → *Networking* (or *Network settings*) → the network security group → *Add inbound port rule*: Source *Any* (or your own ranges), destination port **443**, protocol TCP, action Allow, a name like `Allow-HTTPS`; repeat for **80** (`Allow-HTTP`, used by Caddy to get and renew the certificate and to redirect to HTTPS). If this page shows an authorization error, you need the role in section 1.
-5. **Do not open anything else.** In particular there must be no inbound rule for ports 5000, 5080 or 5173.
-6. **Windows Firewall on the VM** (PowerShell as Administrator):
-   ```powershell
-   New-NetFirewallRule -DisplayName "GuidantShare HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
-   New-NetFirewallRule -DisplayName "GuidantShare HTTP"  -Direction Inbound -Protocol TCP -LocalPort 80  -Action Allow
-   Get-NetFirewallRule -Enabled True -Direction Inbound | Get-NetFirewallPortFilter | Where-Object { $_.LocalPort -in 5000,5080,5173 }
-   ```
-   The last command must print nothing. If it lists a rule such as `FileSync API test` (from the earlier exposure tests), remove it: `Remove-NetFirewallRule -DisplayName "FileSync API test"`.
-
-### C. DNS: the A record
-
-`guidantshare.guidantmso.com` must resolve to the VM's **public IP** from step B2. Only a DNS record is needed (no Wix website hosting).
-
-1. Whoever manages the domain's DNS (it was at Wix; Sheel offered): Wix dashboard → *Domains* → `guidantmso.com` → *Manage DNS records* (names vary slightly by Wix version).
-2. Under **A (Host)** add a record: **Host name** `guidantshare`, **Points to** the public IP, TTL 1 hour (or the lowest offered). Save.
-3. If the domain's name servers are not Wix's, the record belongs wherever the name servers point. Check with `nslookup -type=NS guidantmso.com`.
-4. Check from any machine (changes can take minutes to hours):
-   ```powershell
-   nslookup guidantshare.guidantmso.com
-   ```
-   It should answer with the public IP. Do not start Caddy (F) until it does, or certificate issuance will fail and may be rate-limited for a while.
-
-### D. FileSync: wipe, install the new version, import the jobs
-
-#### D1. Stop and set aside the old data
-
+### Step 3. Record and back up (before touching FileSync)
 ```powershell
-Stop-Service FileSyncService
-Rename-Item C:\Services\FileSync\data    data-old-<date>
-Rename-Item C:\Services\FileSync\staging staging-old-<date>
+cd C:\Services\FileSync
+sc.exe qc FileSyncService                      # confirm the exe path (expected C:\Services\FileSync\bin)
+(Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService).Environment   # note existing env vars
+git rev-parse HEAD; git status                 # note the commit; local edits would block the pull
+Get-Content bin\appsettings.json               # deploy empties bin: note any customisations
+Invoke-RestMethod http://localhost:5000/api/workflows | % { $_ } | Select name, workflowId, isEnabled, direction | Export-Csv C:\Services\jobs-before.csv -NoTypeInformation
+.\scripts\filesync.ps1 -Action Stop            # the OLD script: stops service and old dashboard
+$bk = "C:\Services\backup-$(Get-Date -Format yyyyMMdd-HHmm)"
+robocopy C:\Services\FileSync $bk\FileSync /E /XD ms-playwright node_modules .git
+.\bin\FileSync.Service.exe --export-master-key  # store the key in your password manager
 ```
+Rollback = stop the service, copy `$bk\FileSync\bin` and `$bk\FileSync\data` back, start. The old code still reads a database with the two new columns.
 
-(Renaming keeps a way back. Delete them when you are sure.) FileSync creates fresh `data\` and `staging\` on its next start.
+If `bin\appsettings.json` or an environment variable sets `Api:Urls` to anything but localhost, or `ASPNETCORE_ENVIRONMENT` to `Development`, fix that first.
 
-#### D2. Install the new FileSync and give it an API key
-
-1. Update the code (your usual route, for example `scripts\filesync.ps1 Deploy`, or `git pull` and publish).
-2. Choose a **long random API key** and keep it in your password manager. For example: `[Convert]::ToBase64String((1..32 | % { Get-Random -Maximum 256 }) -as [byte[]])`.
-3. Give it to the FileSync service as an environment variable (a Windows service reads these from its registry key). As Administrator:
-   ```powershell
-   $key = Read-Host "FileSync API key"
-   Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService" -Name Environment -Type MultiString -Value @("Api__Key=$key")
-   ```
-   If the service already has other `Environment` entries, keep them: read them first with `Get-ItemProperty` and add to the array. Outside Development FileSync **refuses to start without `Api__Key`**.
-4. Keep it local: do **not** set `Api__Urls`. The default `http://localhost:5000` is what you want.
-5. `Start-Service FileSyncService`, then check: `Invoke-RestMethod http://localhost:5000/api/health` answers, and `Invoke-RestMethod http://localhost:5000/api/workflows` is rejected (`401`) without the key.
-
-#### D3. Install Chromium for the portal jobs
-
+### Step 4. Upgrade FileSync in place
 ```powershell
-C:\Services\FileSync\bin\FileSync.Service.exe --install-browsers
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); $key = [Convert]::ToBase64String($b)
+$key    # save in your password manager
+$p = "HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService"
+$cur = @((Get-ItemProperty $p -Name Environment -ErrorAction SilentlyContinue).Environment | ? { $_ -and $_ -notlike "Api__Key=*" })
+Set-ItemProperty $p -Name Environment -Type MultiString -Value ($cur + "Api__Key=$key")
+
+cd C:\Services\FileSync
+git pull origin main
+.\scripts\filesync.ps1 -Action Deploy
 ```
-
-(Check `FileSync\scripts\filesync.ps1` to see whether your deploy step already does this.) The Aetna, Champion and SCAN jobs need it.
-
-#### D4. Sign FileSync in to ShareFile
-
-Put `secrets.json` (ShareFile app settings: client ID, secret, subdomain, redirect URI) in `C:\Services\FileSync`, then follow FileSync's `docs\SHAREFILE_OAUTH_GUIDE.md` (it prints an approval link and asks for the code; the command is `FileSync.Service.exe --authorize-sharefile`). The file is imported into the encrypted database and deleted. This is FileSync's own connection; GuidantShare gets a separate one (E3).
-
-#### D5. Mail settings (optional but recommended)
-
-Copy `graph-mail.json` from the migration folder (or from `config\graph-mail.example.json`) to `C:\Services\FileSync\data\graph-mail.json`, fill in the client secret, and see `docs\PORTAL_CONNECTORS.md` for the permissions. FileSync moves the secret into its encrypted database on first use and blanks it in the file.
-
-#### D6. Import the jobs
-
-Edit `jobs-export.json` only if you want to change something (for example set `plan` and `folderLabel` yourself). Then, from the FileSync scripts folder:
-
+Do not delete `data\`, `staging\` or the service account. Check:
 ```powershell
-# 1. Dry run: shows what would happen and which jobs would have no website plan
-.\Import-Jobs.ps1 -File C:\Services\migration-<date>\jobs-export.json -CatalogCsv C:\Services\migration-<date>\old-catalog.csv -ApiKey $key -WhatIf
-
-# 2. For real: asks for each server's password (hidden), imports every job DISABLED
-.\Import-Jobs.ps1 -File C:\Services\migration-<date>\jobs-export.json -CatalogCsv C:\Services\migration-<date>\old-catalog.csv -ApiKey $key
+$h = @{ "X-Api-Key" = $key }
+Invoke-RestMethod http://localhost:5000/api/health
+Invoke-RestMethod http://localhost:5000/api/workflows                  # must FAIL with 401
+(Invoke-RestMethod http://localhost:5000/api/workflows -Headers $h) | % { $_ } | Select name, isEnabled   # matches jobs-before.csv
+Invoke-RestMethod "http://localhost:5000/api/runs?limit=10" -Headers $h  # new runs succeed (passwords and ShareFile token carried over)
 ```
-
-- Jobs are imported **disabled** so nothing runs until you have checked it.
-- `-CatalogCsv` fills *Website Health Plan* and *Website Folder Name* from the old catalog (matched by ShareFile folder id, direction and user name). Existing values are never overwritten. The script lists jobs that got no plan and old catalog rows that matched no job.
-- Passwords are sent straight to FileSync and not written to disk. (`-PasswordsFile` exists for unattended use; delete that file afterwards.)
-- A job whose id already exists in the target is skipped, so the import can be re-run safely.
-- Copy any private key files to the paths the jobs name.
-
-#### D7. Check every job, then enable it
-
-In the FileSync screen (for now at `http://localhost:5173` from the VM, or later in the website under **FileSync**):
-
-1. Open a job → **Test connection**. Fix any password or host key problem. Saving a job re-tests it.
-2. Use **Verify Sync** to compare the SFTP and ShareFile folders.
-3. Check the **Website Health Plan** and **Website Folder Name**; jobs of the same folder must share one ShareFile folder id (a yellow warning shows if not).
-4. Enable the job (the toggle). Do the low-risk jobs first, and run one **Observation** (dry run) per new job before its first live run if you like.
-5. SCAN's first sign-in will ask for a one-time code (typed into the prompt, or read from the mailbox if Graph is set up).
-
-### E. GuidantShare
-
-#### E1. Build and publish
-
-On the VM (needs .NET 10 SDK, Node.js and Git), from the GuidantShare repo:
-
+Then set website names:
 ```powershell
-.\deploy\publish-windows.ps1       # API -> C:\Services\GuidantShare\api, web -> C:\Services\GuidantShare\web
+.\scripts\Set-JobPlans.ps1 -Export C:\Services\plans.csv -ApiKey $key     # fill plan and folderLabel in the CSV
+.\scripts\Set-JobPlans.ps1 -Apply  C:\Services\plans.csv -ApiKey $key -WhatIf
+.\scripts\Set-JobPlans.ps1 -Apply  C:\Services\plans.csv -ApiKey $key
 ```
+Afterwards delete leftover `src\FileSync.Dashboard` (untracked `node_modules`/`dist`).
 
-Or build on another machine and copy the two folders.
-
-#### E2. A ShareFile API app for GuidantShare
-
-FileSync and GuidantShare each use their **own** OAuth connection to the same ShareFile account (a refresh token belongs to one app). In ShareFile's API app registration create (or reuse a second) app and set its redirect URI to `https://guidantshare.guidantmso.com/api/sharefile/callback`. Keep its client ID and secret for E6.
-
-#### E3. Install the service
-
+### Step 5. Install GuidantShare
+Prerequisites: `dotnet --version` (10), `node --version`, `git --version`; the VM's GitHub access must cover the GuidantShare repo (a deploy key works for one repo only).
 ```powershell
-.\deploy\install-api-service.ps1
-```
-
-It asks for FileSync's API key (the same value as in D2) and, optionally, the Graph mail settings, creates the `GuidantShareApi` Windows service (automatic start, restart on failure) and starts it. The app listens on `127.0.0.1:5080` only (`appsettings.Production.json`).
-
-#### E4. Create the first administrator
-
-Run it **from the api folder** so it uses the same `data\` folder as the service:
-
-```powershell
+git clone git@github.com:stephengiang-guidantmso/GuidantShare.git C:\Services\repos\GuidantShare
+cd C:\Services\repos\GuidantShare
+.\deploy\publish-windows.ps1
+.\deploy\install-api-service.ps1 -PublicHost <FQDN>        # paste the same $key; answer N to mail for now
+curl.exe http://127.0.0.1:5080/health                    # fileSync: ok
 cd C:\Services\GuidantShare\api
-.\GuidantShare.Api.exe create-superadmin --email you@guidantmso.com
+.\GuidantShare.Api.exe create-superadmin --email you@guidantmso.com        # open the link later with <FQDN> as the host
 ```
 
-It prints a one-time set-password link (valid 72 hours); the host in the link is the `Email:PublicBaseUrl` set for Production. Open it after Caddy (F) is running, or use `--password '<12+ characters>'` to set the password directly.
-
-#### E5. Mail (optional)
-
-If you did not set it in E3, invite emails are only written to the log and shown to the admin to copy. For real email set `Email__Mode=Graph`, `Email__TenantId`, `Email__ClientId`, `Email__Mailbox` and `Email__ClientSecret` (see [Configuration](reference.md#configuration)); the Entra app needs permission to send as that mailbox.
-
-#### E6. Connect ShareFile
-
-After F: sign in → **Settings** → save the subdomain, client ID, secret and the redirect URI from E2 → **Connect to ShareFile** and approve as the owner account.
-
-### F. Caddy (HTTPS)
-
-1. Install Caddy for Windows (download from caddyserver.com, or `winget`; check the package name) to a folder such as `C:\Services\Caddy`.
-2. Copy `deploy\Caddyfile` there. It serves `C:\Services\GuidantShare\web`, proxies `/api/*` and `/health` to `127.0.0.1:5080` and gets the certificate automatically for `guidantshare.guidantmso.com`.
-3. Check it: `caddy validate --config Caddyfile`.
-4. Run it as a service with a wrapper (for example NSSM or WinSW) that runs `caddy run --config C:\Services\Caddy\Caddyfile` and starts automatically. Caddy itself does not install as a Windows service.
-5. First start needs DNS (C) and ports 80/443 (B) working; watch Caddy's log for the certificate being issued.
-
-### G. Verify from outside
-
-From a machine **not** on the VM's network (your home PC, or a phone off Wi-Fi):
-
+### Step 6. Caddy (HTTPS)
+Download `caddy_windows_amd64` to `C:\Services\Caddy\caddy.exe`, and NSSM (nssm.cc).
 ```powershell
-Invoke-WebRequest https://guidantshare.guidantmso.com/health            # 200, status ok
-Test-NetConnection guidantshare.guidantmso.com -Port 443               # True
-Test-NetConnection <the public IP> -Port 5000                          # must FAIL (FileSync)
-Test-NetConnection <the public IP> -Port 5080                          # must FAIL (API)
-Test-NetConnection <the public IP> -Port 5173                          # must FAIL (old dashboard)
+Copy-Item C:\Services\repos\GuidantShare\deploy\Caddyfile C:\Services\Caddy\
+cd C:\Services\Caddy; $env:GS_HOST = "<FQDN>"; .\caddy.exe validate --config Caddyfile
+nssm install Caddy C:\Services\Caddy\caddy.exe run --config C:\Services\Caddy\Caddyfile
+nssm set Caddy AppDirectory C:\Services\Caddy
+nssm set Caddy AppEnvironmentExtra GS_HOST=<FQDN>
+nssm set Caddy AppStderr C:\Services\Caddy\caddy.log
+nssm start Caddy
+Get-Content C:\Services\Caddy\caddy.log -Tail 30     # "certificate obtained successfully"
 ```
+With 443 limited to your IP, Caddy proves ownership over port 80. If issuance fails, read the log; as a fallback add `tls internal` (browser warning).
 
-Then in the browser:
+### Step 7. ShareFile for GuidantShare
+Register a second ShareFile API app (separate connection from FileSync) with redirect URI `https://<FQDN>/api/sharefile/callback`. Sign in at `https://<FQDN>` → **Settings** → save → **Connect**. If you cannot register one yet, use redirect `https://secure.sharefile.com/oauth/oauthcomplete.aspx` and paste the code. Do not copy FileSync's refresh token.
 
-- [ ] The padlock is valid; `http://` redirects to `https://`.
-- [ ] Sign-in works; **FileSync**, **Users** and **Settings** show for the admin only.
-- [ ] Health Plans lists your plans; each plan's download and upload folders open; a test upload reaches ShareFile and is later sent on by FileSync.
-- [ ] `https://guidantshare.guidantmso.com/api/filesync/workflows` signed out gives `401`; as a normal user `403`.
-- [ ] In the FileSync screen, create/edit/run/cancel a job. Check on the partner side that the connection comes from the whitelisted IP.
-- [ ] Restart `GuidantShareApi`: a running transfer in FileSync is not interrupted.
-- [ ] `/health` shows `fileSync: ok`, `sharefile: connected`, `email: ok`.
+### Verification (from your PC)
+- `curl.exe https://<FQDN>/health` → `status ok`, `fileSync ok`, `sharefile connected`; certificate is valid.
+- `Test-NetConnection <FQDN> -Port 5000` and `-Port 5080` → False.
+- From another network (phone off Wi-Fi): `https://<FQDN>` does not load (443 is home-only).
+- Browser: sign in; FileSync screen lists the same jobs; a real run and Verify Sync succeed; Health Plans shows the plans and folders; download listing works; upload one harmless test file and confirm FileSync delivers it (choose a safe job).
+- `curl.exe https://<FQDN>/api/filesync/workflows` → 401.
+- Restart `GuidantShareApi`: FileSync runs are unaffected.
+- Monday morning: check the FileSync run history and retry queue.
 
-### H. Cut over and clean up
+### Later, when the domain is ready
+A record `guidantshare.guidantmso.com` → the same static IP; set `GS_HOST` to it and restart Caddy; re-run `install-api-service.ps1 -PublicHost guidantshare.guidantmso.com`; update the ShareFile redirect URI; change the 443 rule (Azure and Windows) from your IP to Any.
 
-1. Invite the real users (Users page) and tell them the address.
-2. Retire the old FileSync dashboard: stop whatever serves port 5173 and delete its firewall rule. Remove `src\FileSync.Dashboard` from the FileSync repo once you are happy (it is no longer used).
-3. Remove any other test rules or bindings (the `FileSync API test` rule, `bin\appsettings.json.bak` from the exposure tests).
-4. Back up `C:\Services\GuidantShare\api\data` (`app.db` and `keys\master.key`, separately) and FileSync's `data\` on a schedule. See [Operations](operations.md#day-to-day-operations).
-5. Delete the `data-old-<date>`, `staging-old-<date>` and migration folders when you no longer need them: they hold the old database and key.
-
-### Rolling back
-
-Nothing in the old setup is deleted until step H5, so you can go back: stop the new services, rename `data-old-<date>` and `staging-old-<date>` back, start the old FileSync, and remove the inbound 443/80 rules (and the DNS record) if you want the site gone.
-
-### Troubleshooting
+### Troubleshooting the deployment
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Caddy cannot get a certificate | DNS not pointing at the VM yet, or 80/443 blocked | Check C and B; `nslookup`, then the NSG rules and Windows Firewall |
-| Site loads but Health Plans says "unavailable" | FileSync is down, or the two API keys differ | `Invoke-RestMethod http://localhost:5000/api/health`; the keys in D2 and E3 must match exactly (a `401` is in the GuidantShare log) |
-| FileSync service will not start | `Api__Key` not set on the service | D2 step 3 |
-| A plan or folder is missing | The job has no *Website Health Plan*, is disabled, or has no ShareFile folder id | FileSync screen; the yellow warning lists problems |
-| Folder opens with an error | GuidantShare's ShareFile account cannot open that folder | Share the folder with the account that GuidantShare is connected as |
-| Job shows "connection test failed" after import | Password skipped or wrong, host key changed | Edit the job, enter the password, test again |
-| SCAN asks for a code every run | The portal's device trust was lost with the old profile | Enter the code once; the profile is remembered afterwards |
-| `create-superadmin` made an admin the site does not know | It ran from a different folder, so it used another `data\` | Run it from `C:\Services\GuidantShare\api` (E4) |
+| The reachability test hangs | An NSG rule (NIC or subnet) or the Windows rule is missing | Azure "Effective security rules"; `Get-NetFirewallRule -DisplayName "GuidantShare*"` |
+| FileSync service will not start after the upgrade | `Api__Key` is not set on the service | Set it (Step 4), then `.\scripts\filesync.ps1 -Action Start` |
+| `400 Bad Request` for the site's address | The host name is not in `AllowedHosts` | Re-run `install-api-service.ps1 -PublicHost <name>` |
+| Health Plans says "unavailable" | FileSync is down, or the two API keys differ | Check `http://localhost:5000/api/health`; the keys must match exactly |
+| Sign-in does nothing | The site is opened over `http://` | Use `https://`; the session cookie is only sent over HTTPS |
+| No certificate | Port 80 blocked, or DNS label not set | Read `C:\Services\Caddy\caddy.log` |
+
+The scripts `Export-Jobs.ps1` and `Import-Jobs.ps1` are **not** part of this upgrade. They exist for rebuilding FileSync on a different machine, where passwords have to be typed in again.

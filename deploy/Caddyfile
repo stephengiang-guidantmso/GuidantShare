@@ -3,7 +3,8 @@
 # Caddy gets and renews the TLS certificate automatically (ports 80 and 443 must reach this machine).
 # Written without being run on the VM: validate first with `caddy validate --config Caddyfile`.
 
-guidantshare.guidantmso.com {
+# The site name comes from the GS_HOST environment variable (the Azure DNS name while there is no domain).
+{$GS_HOST:guidantshare.guidantmso.com} {
 	encode zstd gzip
 
 	# The API (it adds its own security headers)

@@ -98,7 +98,7 @@ See [Deployment](docs/operations.md#deployment) and the files in `deploy/`: a Ca
 - Forwarded headers are trusted from the loopback proxy, so the login rate limit sees real client addresses.
 - Run a **single instance**: the folder cache, OAuth state, plan list copy and subfolder allow-list are in memory.
 - Persist and back up `data/` (`app.db` and `keys/master.key`, separately).
-- Going live from scratch (new database, jobs carried over from the old FileSync): see the [go-live guide](docs/operations.md#go-live-from-scratch-clean-install-on-the-sftp-server-vm).
+- Deploying to the VM: see the [go-live guide](docs/operations.md#go-live-deploy-to-the-sftp-server-vm).
 
 ## Notes
 

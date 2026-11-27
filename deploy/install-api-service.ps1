@@ -5,19 +5,24 @@
     The FileSync API key and the Graph mail secret are read from the prompt and stored only in the service's registry key
     (readable by Administrators and SYSTEM), never in a file in the repo. Re-run to change them.
     Written without being run on the VM; read it before use.
+    -PublicHost is the name people type in the browser (the domain, or the Azure DNS name while there is no domain).
+    The app refuses requests for any other host name and uses it in invite and reset links.
 .EXAMPLE
     .\install-api-service.ps1
+    .\install-api-service.ps1 -PublicHost sftpsrvr.westus.cloudapp.azure.com
 #>
 [CmdletBinding()]
 param(
     [string]$Root = "C:\Services\GuidantShare",
     [string]$ServiceName = "GuidantShareApi",
+    [string]$PublicHost = "guidantshare.guidantmso.com",
     [string]$FileSyncBaseUrl = "http://localhost:5000"
 )
 
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $Root "api\GuidantShare.Api.exe"
 if (-not (Test-Path $exe)) { throw "Not found: $exe. Run publish-windows.ps1 first." }
+if ($PublicHost -match '[/:\s]') { throw "-PublicHost is a host name only, without https:// or a path." }
 
 function Read-Secret([string]$prompt) {
     $s = Read-Host -Prompt $prompt -AsSecureString
@@ -29,6 +34,9 @@ if ([string]::IsNullOrWhiteSpace($fileSyncKey)) { throw "The FileSync API key is
 
 $vars = @(
     "ASPNETCORE_ENVIRONMENT=Production",
+    # localhost stays allowed for health checks on the machine itself; the app only listens on 127.0.0.1
+    "AllowedHosts=$PublicHost;localhost;127.0.0.1",
+    "Email__PublicBaseUrl=https://$PublicHost",
     "FileSync__BaseUrl=$FileSyncBaseUrl",
     "FileSync__ApiKey=$fileSyncKey"
 )

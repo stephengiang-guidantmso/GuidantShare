@@ -9,7 +9,7 @@ GuidantShare is an invite-only web app on top of ShareFile for health-plan files
 | [Admin guide](admin-guide.md#admin-guide) | Users, invites, Settings (ShareFile), the FileSync page, and how plans and folders are built from FileSync jobs |
 | [Architecture](architecture.md#architecture) | Components, request flows, security, ShareFile integration, data model |
 | [Reference](reference.md) | Every API endpoint and every configuration setting |
-| [Operations and deployment](operations.md#day-to-day-operations) | Running it, logs, backups, production deployment, **go-live from scratch on the VM**, troubleshooting |
+| [Operations and deployment](operations.md#day-to-day-operations) | Running it, logs, backups, production deployment, **go-live on the VM**, troubleshooting |
 | [Development and testing](development.md#development) | Repository layout, conventions, the test suites, testing locally with mock data |
 
 ## Ground rules the app is built around
