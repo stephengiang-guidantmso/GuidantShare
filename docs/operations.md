@@ -377,23 +377,11 @@ Get-ChildItem C:\Services\backups -Directory | Where-Object CreationTime -lt (Ge
 schtasks /create /tn "Guidant backup" /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Services\backup.ps1" /sc daily /st 02:00 /ru SYSTEM
 ```
 
-These copies are on the same disk; also turn on Azure Backup for the VM. The key files only work on this machine: on a rebuilt server FileSync needs the exported master key, and GuidantShare's ShareFile connection has to be set up again.
+These copies are on the same disk and Azure Backup is not used, so copy one off the VM now and then. The key files only work on this machine: on a rebuilt server FileSync needs the exported master key, and GuidantShare's ShareFile connection has to be set up again.
 
 ### Switching to the real domain and opening the site
 
-After `guidantshare.guidantmso.com` resolves to `20.169.248.229`:
-
-```powershell
-# edits the two address settings only, so the API key and mail secret stay as they are
-$p = "HKLM:\SYSTEM\CurrentControlSet\Services\GuidantShareApi"
-$vars = @((Get-ItemProperty $p).Environment | Where-Object { $_ -notlike "AllowedHosts=*" -and $_ -notlike "Email__PublicBaseUrl=*" })
-Set-ItemProperty $p -Name Environment -Type MultiString -Value ($vars + "AllowedHosts=guidantshare.guidantmso.com;localhost;127.0.0.1" + "Email__PublicBaseUrl=https://guidantshare.guidantmso.com")
-Restart-Service GuidantShareApi
-Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\caddy -Name Environment -Type MultiString -Value @("GS_HOST=guidantshare.guidantmso.com"); Restart-Service caddy
-Set-NetFirewallRule -DisplayName "GuidantShare HTTPS" -RemoteAddress Any
-```
-
-Then set the Azure 443 rule's source to **Any**. If the ShareFile redirect address used the old name, update it in the ShareFile app and in Settings. Invite users after the switch.
+Follow [Hosting at the official address](go-public.md).
 
 ### Verification
 
@@ -409,7 +397,7 @@ Then set the Azure 443 rule's source to **Any**. If the ShareFile redirect addre
 | The reachability test hangs | An Azure rule or the Windows rule is missing | Check both |
 | FileSync will not start after the upgrade | `Api__Key` not set on the service | Step 3 |
 | `fileSync: unreachable` | The two keys differ | Re-copy FileSync's key into `FileSync__ApiKey`, restart `GuidantShareApi` |
-| `400 Bad Request` | The address is not in `AllowedHosts` | Fix the address settings (see switching to the real domain) |
+| `400 Bad Request` | The address is not in `AllowedHosts` | Fix the address settings (see [Hosting at the official address](go-public.md)) |
 | Sign-in does nothing | Opened over `http://` | Use `https://` |
 | No certificate | Port 80 blocked | Read `C:\Services\Caddy\caddy.log`; do not restart repeatedly |
 | Mail fails right after restricting | The policy is still applying | Wait an hour |
