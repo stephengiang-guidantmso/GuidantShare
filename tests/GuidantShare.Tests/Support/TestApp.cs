@@ -44,6 +44,7 @@ public class TestApp : WebApplicationFactory<Program>
         // Tests run one at a time (see AssemblyInfo), so the process-wide variables don't collide.
         Set("Data__Dir", Dir); Set("Data__KeyPath", Path.Combine(Dir, "keys", "master.key"));
         Set("Email__Mode", "Log"); Set("Email__PublicBaseUrl", "http://test.local");
+        Set("Serilog__MinimumLevel__Default", "Warning");   // keep test output readable
     }
 
     private void Set(string k, string v) { _oldEnv[k] = Environment.GetEnvironmentVariable(k); Environment.SetEnvironmentVariable(k, v); }
