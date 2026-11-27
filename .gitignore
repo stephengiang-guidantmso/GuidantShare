@@ -4,6 +4,10 @@ obj/
 .vs/
 *.user
 
+# published builds, when the repo is cloned to the install folder (C:\Services\GuidantShare)
+/api/
+/web/
+
 # web
 node_modules/
 

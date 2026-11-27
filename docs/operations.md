@@ -112,7 +112,7 @@ Only the proxy is reachable from the internet. Do not weaken that: never bind th
 
 For the one-time setup of the VM, the Azure and DNS steps and carrying the FileSync jobs over, follow the [Go-live guide](operations.md#go-live-deploy-to-the-sftp-server-vm). This page is the reference.
 
-Ready-made files are in `deploy/`: `Caddyfile`, `publish-windows.ps1`, `install-api-service.ps1`. Review them before use; they were written without being run on the VM.
+Ready-made files are in `deploy/`: `Caddyfile`, `publish-windows.ps1`, `install-api-service.ps1`. The repo is cloned to `C:\Services\GuidantShare`, so the code, `api\` and `web\` live under one folder.
 
 ### Before go-live (people, not code)
 
@@ -156,7 +156,7 @@ The API and the SPA are separate: the API is published to `api\`, the SPA build 
 
 ### Reverse proxy
 
-`deploy\Caddyfile` serves the SPA files with a fallback to `index.html`, proxies `/api/*` and `/health` to `127.0.0.1:5080`, gets and renews the TLS certificate automatically, and adds the security headers for the static files (the API adds its own). Caddy does not run as a Windows service by itself; run it with a service wrapper such as NSSM or WinSW. The app trusts `X-Forwarded-*` headers only from the loopback address, so the login rate limit sees real client addresses.
+`deploy\Caddyfile` serves the SPA files with a fallback to `index.html`, proxies `/api/*` and `/health` to `127.0.0.1:5080`, gets and renews the TLS certificate automatically, and adds the security headers for the static files (the API adds its own). Caddy runs as a Windows service by itself (`sc.exe create`, see the go-live steps); no wrapper is needed. The app trusts `X-Forwarded-*` headers only from the loopback address, so the login rate limit sees real client addresses.
 
 Uploads can be large: the Caddyfile allows long read and write timeouts on `/api/*`.
 
@@ -166,7 +166,7 @@ Run exactly one copy. The folder cache, OAuth state, catalog copy and folder all
 
 ### Data and backups
 
-Back up `data\app.db` and `data\keys\master.key` on a schedule, separately and securely. See [Operations](operations.md#day-to-day-operations).
+A nightly scheduled task copies both databases and key files; see [Nightly backups](#nightly-backups).
 
 ### Upgrades
 
@@ -247,155 +247,171 @@ Start FileSync, then the API; create the superadmin, connect ShareFile, and set 
 
 ## Go live: deploy to the SFTP server VM
 
-Deploys both repos to `SFTPSRVR`, first reachable only from your own IP under a free Azure DNS name, then (when the domain is ready) publicly. **FileSync is upgraded in place**: its `data\` folder holds the jobs, the encrypted passwords and ShareFile token, and the transfer ledger and file state. The new version only adds two columns. Do **not** wipe it: an empty database loses the passwords and makes every file look new, which can re-send files to partners. GuidantShare starts with an empty database.
+How `SFTPSRVR` was set up, in order. **FileSync is upgraded in place**: its `data\` folder holds the jobs, the encrypted passwords and ShareFile token, and the transfer ledger and file state. Do **not** wipe it: an empty database loses the passwords and makes every file look new, which can re-send files to partners. GuidantShare starts with an empty database. Run VM commands in PowerShell as Administrator. `<FQDN>` is the site's address, `<HOMEIP>` your own public IP.
 
-Pick a quiet period: FileSync stops during the upgrade. Placeholders: `<FQDN>` = the Azure DNS name, `<HOMEIP>` = your PC's public IP (`curl.exe https://ifconfig.me` on your PC).
+### The API key
 
-> Written without being run on the VM. Check each step's output before going on.
+FileSync's API needs one shared secret. It is **never in the web app**; only GuidantShare's server sends it.
 
-### The API key: where it lives and how to set it
+| Service | Variable | Set by |
+|---|---|---|
+| `FileSyncService` | `Api__Key` | its registry `Environment` value (Step 3) |
+| `GuidantShareApi` | `FileSync__ApiKey` | `deploy\install-api-service.ps1` |
 
-FileSync's API is protected by one shared secret, the **API key**. It is **never in the frontend** and never reaches the browser: the browser talks to GuidantShare's own API, and only GuidantShare's server sends the key to FileSync. It lives in exactly two places on the VM, and the two values must be **identical**:
+Both must match, or health shows `fileSync: unreachable`. Read the current key from FileSync's service:
 
-| Where | Name | How it is set | Who reads it |
-|---|---|---|---|
-| FileSync service (`FileSyncService`) | `Api__Key` | Environment variable on the service, stored in its registry key (step D2) | FileSync, to accept or reject each call (`401` without it) |
-| GuidantShare API service (`GuidantShareApi`) | `FileSync__ApiKey` | Prompted for by `deploy\install-api-service.ps1`, stored in that service's registry key (step E3) | GuidantShare's server, to attach it to every call it makes to FileSync |
-
-Rules:
-
-- **Make it long and random** (32+ random bytes). Generate it once with `[Convert]::ToBase64String((1..32 | % { Get-Random -Maximum 256 }) -as [byte[]])` and keep it in your password manager.
-- **Never put it in git, in `appsettings.json` or in the web app.** Environment variables on the service are the only place. (Local development uses the throwaway value `dev-key`, set by `scripts/system.sh`; never reuse it.)
-- **FileSync will not start in Production without it**, and GuidantShare shows "unavailable" (and logs a `401`) if the two differ.
-- **To change (rotate) it:** generate a new value, update `Api__Key` on `FileSyncService` and `FileSync__ApiKey` on `GuidantShareApi` (re-run `install-api-service.ps1`), then restart both services. There is a short gap where plans show "unavailable" if you restart them one after the other.
-- **To check it:** `Invoke-RestMethod http://localhost:5000/api/workflows` without the key must fail with `401`; with `-Headers @{ "X-Api-Key" = $key }` it must work. `https://guidantshare.guidantmso.com/health` should then show `fileSync: ok`.
-
-### Step 1. Azure portal
-1. Virtual machines → `SFTPSRVR` → **Overview** → click the **Public IP address**.
-2. **Configuration**: Assignment **Static**; **DNS name label** e.g. `guidant-sftp` → Save. Note `<FQDN>` (`guidant-sftp.<region>.cloudapp.azure.com`).
-3. VM → **Networking** (Network settings) → note whether there is an NSG on the NIC, the subnet, or both; add the rules to each. **Add inbound port rule** twice:
-
-| Name | Source | Source IP | Dest port | Protocol | Priority |
-|---|---|---|---|---|---|
-| Allow-HTTPS-Home | IP Addresses | `<HOMEIP>/32` | 443 | TCP | 300 |
-| Allow-HTTP | Any | | 80 | TCP | 310 |
-
-Port 80 is open to Any because Let's Encrypt checks from its own addresses to issue the certificate; Caddy only answers that check and redirects there. No rule for 5000, 5080 or 5173. Leave the RDP rules as they are.
-
-### Step 2. Reachability test (changes nothing in FileSync)
-VM, PowerShell as Administrator:
 ```powershell
-Get-NetTCPConnection -LocalPort 80,443 -State Listen -ErrorAction SilentlyContinue   # should print nothing (IIS etc.)
-New-NetFirewallRule -DisplayName "GuidantShare HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
-New-NetFirewallRule -DisplayName "GuidantShare HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -RemoteAddress <HOMEIP> -Action Allow
+$key = (((Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService).Environment | Where-Object { $_ -like "Api__Key=*" }) -replace '^Api__Key=', '')
 ```
-Throwaway listener (answers only `/api/health`):
-```powershell
-$l = [System.Net.HttpListener]::new(); $l.Prefixes.Add("http://+:80/"); $l.Start(); "listening, Ctrl+C to stop"
-try { while ($true) {
-  $t = $l.GetContextAsync(); while (-not $t.Wait(500)) {}
-  $c = $t.Result; "$($c.Request.RemoteEndPoint) $($c.Request.Url.AbsolutePath)"
-  if ($c.Request.Url.AbsolutePath -eq "/api/health") { $b = [Text.Encoding]::UTF8.GetBytes('{"status":"ok"}') } else { $c.Response.StatusCode = 404; $b = [byte[]]@() }
-  $c.Response.OutputStream.Write($b, 0, $b.Length); $c.Response.Close()
-} } finally { $l.Stop() }
-```
-Your PC: `curl.exe http://<FQDN>/api/health` → `{"status":"ok"}`. Then Ctrl+C on the VM. If it hangs: check both NSGs ("Effective security rules"), the Windows rule, and `nslookup <FQDN>`. **Do not continue until this works.**
 
-### Step 3. Record and back up (before touching FileSync)
+To change it, set the new value on both services and restart both.
+
+### Step 1. Network and address
+
+- Azure: VM → **Network settings** → the security group on the network card. Add inbound TCP rules: **443** from `<HOMEIP>/32` while testing, **80** from Any (certificate issue and renewal). Never open 5000 or 5080.
+- Windows Firewall: matching rules named `GuidantShare HTTPS` (`-RemoteAddress <HOMEIP>`) and `GuidantShare HTTP`.
+- The VM's public IP is `20.169.248.229` (in and out). The IP resource is in another resource group; ask its owner to confirm it is **Static**.
+- Address: `guidantshare.guidantmso.com` once its A record exists. Until then `20-169-248-229.sslip.io` (a free public name for that IP) works and gets a real certificate.
+- To prove reachability before installing anything, run a temporary `System.Net.HttpListener` on port 80 that answers `/api/health`, and request it from outside.
+
+### Step 2. Record and back up FileSync
+
 ```powershell
 cd C:\Services\FileSync
-sc.exe qc FileSyncService                      # confirm the exe path (expected C:\Services\FileSync\bin)
-(Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService).Environment   # note existing env vars
-git rev-parse HEAD; git status                 # note the commit; local edits would block the pull
-Get-Content bin\appsettings.json               # deploy empties bin: note any customisations
-Invoke-RestMethod http://localhost:5000/api/workflows | % { $_ } | Select name, workflowId, isEnabled, direction | Export-Csv C:\Services\jobs-before.csv -NoTypeInformation
-.\scripts\filesync.ps1 -Action Stop            # the OLD script: stops service and old dashboard
+git rev-parse --short HEAD; git status
+.\scripts\filesync.ps1 -Action Stop
 $bk = "C:\Services\backup-$(Get-Date -Format yyyyMMdd-HHmm)"
-robocopy C:\Services\FileSync $bk\FileSync /E /XD ms-playwright node_modules .git
-.\bin\FileSync.Service.exe --export-master-key  # store the key in your password manager
+robocopy C:\Services\FileSync "$bk\FileSync" /E /XD ms-playwright node_modules .git /NFL /NDL
+.\bin\FileSync.Service.exe --export-master-key     # keep it in a password manager
 ```
-Rollback = stop the service, copy `$bk\FileSync\bin` and `$bk\FileSync\data` back, start. The old code still reads a database with the two new columns.
 
-If `bin\appsettings.json` or an environment variable sets `Api:Urls` to anything but localhost, or `ASPNETCORE_ENVIRONMENT` to `Development`, fix that first.
+Rolling back: stop the service, copy `$bk\FileSync\bin` and `$bk\FileSync\data` back, start.
 
-### Step 4. Upgrade FileSync in place
+### Step 3. Upgrade FileSync
+
 ```powershell
-$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); $key = [Convert]::ToBase64String($b)
-$key    # save in your password manager
-$p = "HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService"
-$cur = @((Get-ItemProperty $p -Name Environment -ErrorAction SilentlyContinue).Environment | ? { $_ -and $_ -notlike "Api__Key=*" })
-Set-ItemProperty $p -Name Environment -Type MultiString -Value ($cur + "Api__Key=$key")
-
-cd C:\Services\FileSync
-git pull origin main
-.\scripts\filesync.ps1 -Action Deploy
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); $key = [Convert]::ToBase64String($b); $key   # password manager
+Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\FileSyncService -Name Environment -Type MultiString -Value @("Api__Key=$key")
+cd C:\Services\FileSync; git pull origin main; .\scripts\filesync.ps1 -Action Deploy
 ```
-Do not delete `data\`, `staging\` or the service account. Check:
-```powershell
-$h = @{ "X-Api-Key" = $key }
-Invoke-RestMethod http://localhost:5000/api/health
-Invoke-RestMethod http://localhost:5000/api/workflows                  # must FAIL with 401
-(Invoke-RestMethod http://localhost:5000/api/workflows -Headers $h) | % { $_ } | Select name, isEnabled   # matches jobs-before.csv
-Invoke-RestMethod "http://localhost:5000/api/runs?limit=10" -Headers $h  # new runs succeed (passwords and ShareFile token carried over)
-```
-Then set website names:
-```powershell
-.\scripts\Set-JobPlans.ps1 -Export C:\Services\plans.csv -ApiKey $key     # fill plan and folderLabel in the CSV
-.\scripts\Set-JobPlans.ps1 -Apply  C:\Services\plans.csv -ApiKey $key -WhatIf
-.\scripts\Set-JobPlans.ps1 -Apply  C:\Services\plans.csv -ApiKey $key
-```
-Afterwards delete leftover `src\FileSync.Dashboard` (untracked `node_modules`/`dist`).
 
-### Step 5. Install GuidantShare
-Prerequisites: `dotnet --version` (10), `node --version`, `git --version`; the VM's GitHub access must cover the GuidantShare repo (a deploy key works for one repo only).
+The deploy script can report success when the service failed to start, so check: `Get-Service FileSyncService`; `/api/health` answers; `/api/workflows` is `401` without the key; with it, all jobs are listed and new runs complete.
+
+Set the website plan and folder names with `scripts\Set-JobPlans.ps1` (`-Export`, fill the CSV, `-Apply -WhatIf`, `-Apply`).
+
+### Step 4. Install GuidantShare
+
 ```powershell
-git clone git@github.com:stephengiang-guidantmso/GuidantShare.git C:\Services\repos\GuidantShare
-cd C:\Services\repos\GuidantShare
+git clone https://github.com/stephengiang-guidantmso/GuidantShare.git C:\Services\GuidantShare
+cd C:\Services\GuidantShare
 .\deploy\publish-windows.ps1
-.\deploy\install-api-service.ps1 -PublicHost <FQDN>        # paste the same $key; answer N to mail for now
-curl.exe http://127.0.0.1:5080/health                    # fileSync: ok
-cd C:\Services\GuidantShare\api
-.\GuidantShare.Api.exe create-superadmin --email you@guidantmso.com        # open the link later with <FQDN> as the host
+.\deploy\install-api-service.ps1 -PublicHost <FQDN>
+curl.exe http://127.0.0.1:5080/health                    # status ok, fileSync ok
 ```
 
-### Step 6. Caddy (HTTPS)
-Download `caddy_windows_amd64` to `C:\Services\Caddy\caddy.exe`, and NSSM (nssm.cc).
+Always pass `-PublicHost`; without it the real domain is assumed. The installer replaces all the service's variables, so answer its mail questions again if mail is set up.
+
+Create the first admin from the `api` folder, keeping the password out of history:
+
 ```powershell
-Copy-Item C:\Services\repos\GuidantShare\deploy\Caddyfile C:\Services\Caddy\
-cd C:\Services\Caddy; $env:GS_HOST = "<FQDN>"; .\caddy.exe validate --config Caddyfile
-nssm install Caddy C:\Services\Caddy\caddy.exe run --config C:\Services\Caddy\Caddyfile
-nssm set Caddy AppDirectory C:\Services\Caddy
-nssm set Caddy AppEnvironmentExtra GS_HOST=<FQDN>
-nssm set Caddy AppStderr C:\Services\Caddy\caddy.log
-nssm start Caddy
-Get-Content C:\Services\Caddy\caddy.log -Tail 30     # "certificate obtained successfully"
+$s = Read-Host "New admin password" -AsSecureString
+$pw = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+cd C:\Services\GuidantShare\api; .\GuidantShare.Api.exe create-superadmin --email you@guidantmso.com --password $pw; Remove-Variable pw, s
 ```
-With 443 limited to your IP, Caddy proves ownership over port 80. If issuance fails, read the log; as a fallback add `tls internal` (browser warning).
 
-### Step 7. ShareFile for GuidantShare
-Register a second ShareFile API app (separate connection from FileSync) with redirect URI `https://<FQDN>/api/sharefile/callback`. Sign in at `https://<FQDN>` → **Settings** → save → **Connect**. If you cannot register one yet, use redirect `https://secure.sharefile.com/oauth/oauthcomplete.aspx` and paste the code. Do not copy FileSync's refresh token.
+### Step 5. Caddy (HTTPS)
 
-### Verification (from your PC)
-- `curl.exe https://<FQDN>/health` → `status ok`, `fileSync ok`, `sharefile connected`; certificate is valid.
-- `Test-NetConnection <FQDN> -Port 5000` and `-Port 5080` → False.
-- From another network (phone off Wi-Fi): `https://<FQDN>` does not load (443 is home-only).
-- Browser: sign in; FileSync screen lists the same jobs; a real run and Verify Sync succeed; Health Plans shows the plans and folders; download listing works; upload one harmless test file and confirm FileSync delivers it (choose a safe job).
-- `curl.exe https://<FQDN>/api/filesync/workflows` → 401.
-- Restart `GuidantShareApi`: FileSync runs are unaffected.
-- Monday morning: check the FileSync run history and retry queue.
+```powershell
+New-Item -ItemType Directory C:\Services\Caddy -Force | Out-Null; cd C:\Services\Caddy
+Invoke-WebRequest "https://caddyserver.com/api/download?os=windows&arch=amd64" -OutFile caddy.exe -UseBasicParsing
+$top = "{`n`tstorage file_system C:/Services/Caddy/data`n`tlog {`n`t`toutput file C:/Services/Caddy/caddy.log`n`t}`n}`n`n"
+Set-Content Caddyfile ($top + (Get-Content C:\Services\GuidantShare\deploy\Caddyfile -Raw))
+$env:GS_HOST = "<FQDN>"; .\caddy.exe validate --config Caddyfile
+sc.exe create caddy start= auto binPath= "C:\Services\Caddy\caddy.exe run --config C:\Services\Caddy\Caddyfile"
+Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\caddy -Name Environment -Type MultiString -Value @("GS_HOST=<FQDN>")
+sc.exe start caddy
+```
 
-### Later, when the domain is ready
-A record `guidantshare.guidantmso.com` → the same static IP; set `GS_HOST` to it and restart Caddy; re-run `install-api-service.ps1 -PublicHost guidantshare.guidantmso.com`; update the ShareFile redirect URI; change the 443 rule (Azure and Windows) from your IP to Any.
+`caddy.log` should say `certificate obtained successfully`.
+
+### Step 6. ShareFile
+
+Sign in at `https://<FQDN>` → **Settings** → save the ShareFile app details → **Connect**. This is GuidantShare's own connection; do not copy FileSync's token.
+
+### Step 7. Mail
+
+1. Entra: register an app used only by the website (`GuidantShare Mail`), add Microsoft Graph **Mail.Send** (application), grant admin consent.
+2. Create a shared mailbox to send from (`guidantshare@guidantmso.com`).
+3. Limit the app to that mailbox (Exchange Online PowerShell). A shared mailbox cannot be named directly, so use a mail-enabled security group containing only it:
+   ```powershell
+   Connect-ExchangeOnline -DisableWAM
+   New-DistributionGroup -Name "GuidantShare Mail Senders" -Alias guidantshare-senders -Type Security -Members guidantshare@guidantmso.com
+   New-ApplicationAccessPolicy -AppId <client-id> -PolicyScopeGroupId guidantshare-senders@guidantmso.com -AccessRight RestrictAccess -Description "GuidantShare mail only"
+   Test-ApplicationAccessPolicy -AppId <client-id> -Identity guidantshare@guidantmso.com    # Granted
+   ```
+   Any other mailbox must test as **Denied**.
+4. Create a client secret (note when it expires: mail stops then) and re-run `install-api-service.ps1 -PublicHost <FQDN>`, answering `y` to Graph.
+5. Health shows `email: ok`, `emailMode: Graph`; send a test invite.
+
+### Nightly backups
+
+Put `sqlite3.exe` (from sqlite.org) in `C:\Services\tools`, then:
+
+```powershell
+New-Item -ItemType Directory C:\Services\backups -Force | Out-Null
+icacls C:\Services\backups /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F"
+@'
+$ErrorActionPreference = "Stop"
+$dest = "C:\Services\backups\$(Get-Date -Format yyyyMMdd-HHmm)"
+New-Item -ItemType Directory $dest -Force | Out-Null
+$sqlite = "C:\Services\tools\sqlite3.exe"
+& $sqlite C:\Services\FileSync\data\filesync.db ".backup '$dest\filesync.db'"
+if ($LASTEXITCODE -ne 0) { throw "FileSync backup failed" }
+& $sqlite C:\Services\GuidantShare\api\data\app.db ".backup '$dest\app.db'"
+if ($LASTEXITCODE -ne 0) { throw "GuidantShare backup failed" }
+Copy-Item C:\Services\FileSync\data\keys\master.key "$dest\filesync-master.key"
+Copy-Item C:\Services\GuidantShare\api\data\keys\master.key "$dest\guidantshare-master.key"
+Copy-Item C:\Services\FileSync\data\graph-mail.json $dest
+Get-ChildItem C:\Services\backups -Directory | Where-Object CreationTime -lt (Get-Date).AddDays(-14) | Remove-Item -Recurse -Force
+'@ | Set-Content C:\Services\backup.ps1
+schtasks /create /tn "Guidant backup" /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Services\backup.ps1" /sc daily /st 02:00 /ru SYSTEM
+```
+
+These copies are on the same disk; also turn on Azure Backup for the VM. The key files only work on this machine: on a rebuilt server FileSync needs the exported master key, and GuidantShare's ShareFile connection has to be set up again.
+
+### Switching to the real domain and opening the site
+
+After `guidantshare.guidantmso.com` resolves to `20.169.248.229`:
+
+```powershell
+# edits the two address settings only, so the API key and mail secret stay as they are
+$p = "HKLM:\SYSTEM\CurrentControlSet\Services\GuidantShareApi"
+$vars = @((Get-ItemProperty $p).Environment | Where-Object { $_ -notlike "AllowedHosts=*" -and $_ -notlike "Email__PublicBaseUrl=*" })
+Set-ItemProperty $p -Name Environment -Type MultiString -Value ($vars + "AllowedHosts=guidantshare.guidantmso.com;localhost;127.0.0.1" + "Email__PublicBaseUrl=https://guidantshare.guidantmso.com")
+Restart-Service GuidantShareApi
+Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\caddy -Name Environment -Type MultiString -Value @("GS_HOST=guidantshare.guidantmso.com"); Restart-Service caddy
+Set-NetFirewallRule -DisplayName "GuidantShare HTTPS" -RemoteAddress Any
+```
+
+Then set the Azure 443 rule's source to **Any**. If the ShareFile redirect address used the old name, update it in the ShareFile app and in Settings. Invite users after the switch.
+
+### Verification
+
+- `https://<FQDN>/health`: `status ok`, `fileSync ok`, `sharefile connected`, `email ok`.
+- Ports 5000 and 5080 do not answer from outside.
+- `https://<FQDN>/api/filesync/workflows` signed out gives `401`.
+- A normal user sees no FileSync, Users or Settings; browsing and a test upload work.
 
 ### Troubleshooting the deployment
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| The reachability test hangs | An NSG rule (NIC or subnet) or the Windows rule is missing | Azure "Effective security rules"; `Get-NetFirewallRule -DisplayName "GuidantShare*"` |
-| FileSync service will not start after the upgrade | `Api__Key` is not set on the service | Set it (Step 4), then `.\scripts\filesync.ps1 -Action Start` |
-| `400 Bad Request` for the site's address | The host name is not in `AllowedHosts` | Re-run `install-api-service.ps1 -PublicHost <name>` |
-| Health Plans says "unavailable" | FileSync is down, or the two API keys differ | Check `http://localhost:5000/api/health`; the keys must match exactly |
-| Sign-in does nothing | The site is opened over `http://` | Use `https://`; the session cookie is only sent over HTTPS |
-| No certificate | Port 80 blocked, or DNS label not set | Read `C:\Services\Caddy\caddy.log` |
+| The reachability test hangs | An Azure rule or the Windows rule is missing | Check both |
+| FileSync will not start after the upgrade | `Api__Key` not set on the service | Step 3 |
+| `fileSync: unreachable` | The two keys differ | Re-copy FileSync's key into `FileSync__ApiKey`, restart `GuidantShareApi` |
+| `400 Bad Request` | The address is not in `AllowedHosts` | Fix the address settings (see switching to the real domain) |
+| Sign-in does nothing | Opened over `http://` | Use `https://` |
+| No certificate | Port 80 blocked | Read `C:\Services\Caddy\caddy.log`; do not restart repeatedly |
+| Mail fails right after restricting | The policy is still applying | Wait an hour |
 
-The scripts `Export-Jobs.ps1` and `Import-Jobs.ps1` are **not** part of this upgrade. They exist for rebuilding FileSync on a different machine, where passwords have to be typed in again.
+`Export-Jobs.ps1` and `Import-Jobs.ps1` are **not** part of this upgrade. They are for rebuilding FileSync on a different machine, where passwords have to be typed in again.
